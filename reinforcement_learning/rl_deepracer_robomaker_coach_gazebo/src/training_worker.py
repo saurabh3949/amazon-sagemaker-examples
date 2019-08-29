@@ -10,7 +10,7 @@ import numpy as np
 import subprocess
 
 import markov.defaults as defaults
-import markov.deepracer_memory as deepracer_memory
+import markov.deepracer_memory_multi as deepracer_memory
 
 from markov.s3_client import SageS3Client
 from markov.utils import get_ip_from_host, load_model_metadata, DoorMan
