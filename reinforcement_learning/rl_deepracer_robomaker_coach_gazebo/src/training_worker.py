@@ -75,7 +75,10 @@ def training_worker(graph_manager, checkpoint_dir, use_pretrained_model, framewo
     # training loop
     steps = 0
 
-    graph_manager.memory_backend = deepracer_memory.DeepRacerTrainerBackEnd(memory_backend_params)
+    num_consecutive_playing_steps = graph_manager.agent_params.algorithm.num_consecutive_playing_steps.num_steps
+    logger.info("Training job will train the model after every %s steps (episodes)" % num_consecutive_playing_steps)
+    graph_manager.memory_backend = deepracer_memory.DeepRacerTrainerBackEnd(params=memory_backend_params,
+                                                                            num_consecutive_playing_steps=num_consecutive_playing_steps)
 
     # To handle SIGTERM
     door_man = DoorMan()
