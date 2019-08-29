@@ -193,6 +193,7 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.steps = 0
             self.simulation_start_time = 0
             self.allow_servo_step_signals = False
+            self.checkpoint_num = 0
 
     def reset(self):
         if node_type == SAGEMAKER_TRAINING_WORKER:
@@ -475,8 +476,12 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.update_eval_metrics(progress)
             self.write_metrics_to_s3()
 
+    def set_checkpoint_num(self, checkpoint_num):
+        self.checkpoint_num = checkpoint_num
+    
     def update_eval_metrics(self, progress):
         eval_metric = {}
+        eval_metric['checkpoint_num'] = int(self.checkpoint_num)
         eval_metric['completion_percentage'] = int(progress)
         eval_metric['metric_time'] = int(round(time.time() * 1000))
         eval_metric['start_time'] = int(round(self.simulation_start_time * 1000))

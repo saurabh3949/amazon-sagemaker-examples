@@ -10,7 +10,7 @@ from markov.s3_boto_data_store import S3BotoDataStore, S3BotoDataStoreParameters
 from markov.utils import load_model_metadata
 from markov.utils import Logger
 from rl_coach.base_parameters import TaskParameters
-from rl_coach.core_types import EnvironmentSteps
+from rl_coach.core_types import EnvironmentSteps, EnvironmentEpisodes
 from gym.envs.registration import register
 import markov.defaults as defaults
 
@@ -20,11 +20,15 @@ if not os.path.exists(CUSTOM_FILES_PATH):
 
 logger = Logger(__name__, logging.INFO).get_logger()
 
+
 def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
     # initialize graph
     task_parameters = TaskParameters(evaluate_only=True)
     task_parameters.__dict__['checkpoint_restore_dir'] = local_model_directory
     graph_manager.create_graph(task_parameters)
+    graph_manager.reset_internal_state()
+
+    data_store = graph_manager.data_store
 
     try:
         # This will only work for DeepRacerRacetrackEnv enviroments
@@ -34,12 +38,46 @@ def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
 
     curr_num_trials = 0
 
-    while curr_num_trials < number_of_trials:
-        graph_manager.evaluate(EnvironmentSteps(1))
+    while True:
+        # Get current checkpoint number
+        current_checkpoint = get_latest_checkpoint(local_model_directory)
+
+        # Register the checkpoint with the environment for logging
+        graph_manager.top_level_manager.environment.env.env.set_checkpoint_num(current_checkpoint)
+
+        graph_manager.evaluate(EnvironmentEpisodes(1))
         curr_num_trials += 1
+
+
+        latest_checkpoint = data_store.get_latest_checkpoint()
+        if latest_checkpoint:
+            if latest_checkpoint > current_checkpoint:
+                    data_store.load_from_store(expected_checkpoint_number=latest_checkpoint)
+                    graph_manager.restore_checkpoint()
+    
+        if should_stop(local_model_directory):
+            break
 
     # Close the down the job
     graph_manager.top_level_manager.environment.env.env.cancel_simulation_job()
+
+
+def get_latest_checkpoint(checkpoint_dir):
+    if os.path.exists(os.path.join(checkpoint_dir, 'checkpoint')):
+        ckpt = CheckpointState()
+        contents = open(os.path.join(checkpoint_dir, 'checkpoint'), 'r').read()
+        text_format.Merge(contents, ckpt)
+        # rel_path = os.path.relpath(ckpt.model_checkpoint_path, checkpoint_dir)
+        rel_path = ckpt.model_checkpoint_path
+        return int(rel_path.split('_Step')[0])
+
+
+def should_stop(checkpoint_dir):
+    if os.path.exists(os.path.join(checkpoint_dir, SyncFiles.FINISHED.value)):
+        logger.info("Received termination signal from trainer. Goodbye.")
+        return True
+    return False
+
 
 def main():
     parser = argparse.ArgumentParser()
