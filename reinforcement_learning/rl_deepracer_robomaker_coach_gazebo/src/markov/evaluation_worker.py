@@ -11,6 +11,12 @@ from markov.utils import load_model_metadata
 from markov.utils import Logger
 from rl_coach.base_parameters import TaskParameters
 from rl_coach.core_types import EnvironmentSteps, EnvironmentEpisodes
+from rl_coach.utils import short_dynamic_import
+from rl_coach.data_stores.data_store import DataStoreParameters, SyncFiles
+
+from google.protobuf import text_format
+from tensorflow.python.training.checkpoint_state_pb2 import CheckpointState
+
 from gym.envs.registration import register
 import markov.defaults as defaults
 
@@ -19,6 +25,36 @@ if not os.path.exists(CUSTOM_FILES_PATH):
     os.makedirs(CUSTOM_FILES_PATH)
 
 logger = Logger(__name__, logging.INFO).get_logger()
+
+
+def download_custom_files_if_present(s3_client, s3_prefix):
+    environment_file_s3_key = os.path.normpath(s3_prefix + "/environments/deepracer_racetrack_env.py")
+    environment_local_path = os.path.join(CUSTOM_FILES_PATH, "deepracer_racetrack_env.py")
+    success_environment_download = s3_client.download_file(s3_key=environment_file_s3_key,
+                                                           local_path=environment_local_path)
+
+    preset_file_s3_key = os.path.normpath(s3_prefix + "/presets/preset.py")
+    preset_local_path = os.path.join(CUSTOM_FILES_PATH, "preset.py")
+    success_preset_download = s3_client.download_file(s3_key=preset_file_s3_key,
+                                                      local_path=preset_local_path)
+    return success_preset_download, success_environment_download
+
+
+def get_latest_checkpoint(checkpoint_dir):
+    if os.path.exists(os.path.join(checkpoint_dir, 'checkpoint')):
+        ckpt = CheckpointState()
+        contents = open(os.path.join(checkpoint_dir, 'checkpoint'), 'r').read()
+        text_format.Merge(contents, ckpt)
+        # rel_path = os.path.relpath(ckpt.model_checkpoint_path, checkpoint_dir)
+        rel_path = ckpt.model_checkpoint_path
+        return int(rel_path.split('_Step')[0])
+
+
+def should_stop(checkpoint_dir):
+    if os.path.exists(os.path.join(checkpoint_dir, SyncFiles.FINISHED.value)):
+        logger.info("Received termination signal from trainer. Goodbye.")
+        return True
+    return False
 
 
 def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
@@ -62,23 +98,6 @@ def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
     graph_manager.top_level_manager.environment.env.env.cancel_simulation_job()
 
 
-def get_latest_checkpoint(checkpoint_dir):
-    if os.path.exists(os.path.join(checkpoint_dir, 'checkpoint')):
-        ckpt = CheckpointState()
-        contents = open(os.path.join(checkpoint_dir, 'checkpoint'), 'r').read()
-        text_format.Merge(contents, ckpt)
-        # rel_path = os.path.relpath(ckpt.model_checkpoint_path, checkpoint_dir)
-        rel_path = ckpt.model_checkpoint_path
-        return int(rel_path.split('_Step')[0])
-
-
-def should_stop(checkpoint_dir):
-    if os.path.exists(os.path.join(checkpoint_dir, SyncFiles.FINISHED.value)):
-        logger.info("Received termination signal from trainer. Goodbye.")
-        return True
-    return False
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--preset',
@@ -105,6 +124,10 @@ def main():
                         help='(string) Path to a folder containing a checkpoint to restore the model from.',
                         type=str,
                         default='./checkpoint')
+    parser.add_argument('--model_metadata_s3_key',
+                        help='(string) Model Metadata File S3 Key',
+                        type=str,
+                        default=os.environ.get("MODEL_METADATA_FILE_S3_KEY", None))
 
     args = parser.parse_args()
 
@@ -115,26 +138,21 @@ def main():
 
     # Load the model metadata
     model_metadata_local_path = os.path.join(CUSTOM_FILES_PATH, 'model_metadata.json')
-    load_model_metadata(s3_client, os.path.normpath("%s/model/model_metadata.json" % args.s3_prefix), model_metadata_local_path)
+    load_model_metadata(s3_client, args.model_metadata_s3_key, model_metadata_local_path)
 
     # Download the model
     s3_client.download_model(args.local_model_directory)
 
-    # Download hyperparameters from SageMaker
-    hyperparameters_file_success = False
-    hyperparams_s3_key = os.path.normpath(args.s3_prefix + "/ip/hyperparameters.json")
-    hyperparameters_file_success = s3_client.download_file(s3_key=hyperparams_s3_key,
-                                                           local_path="hyperparameters.json")
-    sm_hyperparams_dict = {}
-    if hyperparameters_file_success:
-        logger.info("Received Sagemaker hyperparameters successfully!")
-        with open("hyperparameters.json") as fp:
-            sm_hyperparams_dict = json.load(fp)
-    else:
-        logger.info("SageMaker hyperparameters not found.")
+    preset_file_success, _ = download_custom_files_if_present(s3_client, args.s3_prefix)
 
-    from markov.sagemaker_graph_manager import get_graph_manager
-    graph_manager, _ = get_graph_manager(**sm_hyperparams_dict)
+    if preset_file_success:
+        preset_location = os.path.join(CUSTOM_FILES_PATH, "preset.py")
+        preset_location += ":graph_manager"
+        graph_manager = short_dynamic_import(preset_location, ignore_module_case=True)
+        logger.info("Using custom preset file!")
+    else:
+        logger.info("Preset file could not be downloaded. Exiting!")
+        sys.exit(1)
 
     ds_params_instance = S3BotoDataStoreParameters(bucket_name=args.s3_bucket,
                                                    checkpoint_dir=args.local_model_directory,

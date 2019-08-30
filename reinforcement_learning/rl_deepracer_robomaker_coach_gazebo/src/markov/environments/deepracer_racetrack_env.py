@@ -2,10 +2,12 @@ from __future__ import print_function
 
 import bisect
 import boto3
+import datetime
 import json
 import logging
 import math
 import os
+import re
 import time
 import traceback
 import sys
@@ -19,6 +21,7 @@ from PIL import Image
 from markov import utils
 
 logger = utils.Logger(__name__, logging.INFO).get_logger()
+logger.info("*********** ENV from SimApp **********************")
 
 # Type of worker
 SIMULATION_WORKER = "SIMULATION_WORKER"
@@ -29,9 +32,11 @@ if node_type == SIMULATION_WORKER:
     import rospy
     from std_msgs.msg import Float64
     from gazebo_msgs.msg import ModelState
-    from gazebo_msgs.srv import GetLinkState, GetModelState, JointRequest
+    from gazebo_msgs.srv import GetLinkState, GetModelState, JointRequest, SetModelState, SpawnModel
+    from geometry_msgs.msg import Pose
     from scipy.spatial.transform import Rotation
     from sensor_msgs.msg import Image as sensor_image
+    from rosgraph_msgs.msg import Clock as clock
     from shapely.geometry import Point, Polygon
     from shapely.geometry.polygon import LinearRing, LineString
     from deepracer_simulation_environment.srv import GetWaypointSrv, ResetCarSrv
@@ -67,9 +72,12 @@ STEERING_TOPICS = ['/racecar/left_steering_hinge_position_controller/command',
                    '/racecar/right_steering_hinge_position_controller/command']
 
 # List of all effort joints
-EFFORT_JOINTS = ['/racecar/left_rear_wheel_joint', '/racecar/right_rear_wheel_joint',
-                 '/racecar/left_front_wheel_joint','/racecar/right_front_wheel_joint',
-                 '/racecar/left_steering_hinge_joint','/racecar/right_steering_hinge_joint']
+EFFORT_JOINTS = ['/racecar/left_rear_wheel_joint',
+                 '/racecar/right_rear_wheel_joint',
+                 '/racecar/left_front_wheel_joint',
+                 '/racecar/right_front_wheel_joint',
+                 '/racecar/left_steering_hinge_joint',
+                 '/racecar/right_steering_hinge_joint']
 # Radius of the wheels of the car in meters
 WHEEL_RADIUS = 0.1
 
@@ -77,6 +85,7 @@ WHEEL_RADIUS = 0.1
 # This number should corespond to the camera FPS, since it is pacing the
 # step rate.
 NUM_STEPS_TO_CHECK_STUCK = 15
+
 
 ### Gym Env ###
 class DeepRacerRacetrackEnv(gym.Env):
@@ -99,17 +108,16 @@ class DeepRacerRacetrackEnv(gym.Env):
             rospy.wait_for_service('/deepracer_simulation_environment/get_waypoints')
             rospy.wait_for_service('/deepracer_simulation_environment/reset_car')
             rospy.wait_for_service('/gazebo/get_model_state')
+
             rospy.wait_for_service('/gazebo/get_link_state')
             rospy.wait_for_service('/gazebo/clear_joint_forces')
+            rospy.wait_for_service('/gazebo/spawn_urdf_model')
 
             self.get_model_state = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
             self.get_link_state = rospy.ServiceProxy('/gazebo/get_link_state', GetLinkState)
-            self.clear_forces_client = rospy.ServiceProxy('/gazebo/clear_joint_forces',
-                                                          JointRequest)
-            self.reset_car_client = rospy.ServiceProxy('/deepracer_simulation_environment/reset_car',
-                                                       ResetCarSrv)
-            get_waypoints_client = rospy.ServiceProxy('/deepracer_simulation_environment/get_waypoints',
-                                                      GetWaypointSrv)
+            self.clear_forces_client = rospy.ServiceProxy('/gazebo/clear_joint_forces', JointRequest)
+            self.reset_car_client = rospy.ServiceProxy('/deepracer_simulation_environment/reset_car', ResetCarSrv)
+            get_waypoints_client = rospy.ServiceProxy('/deepracer_simulation_environment/get_waypoints', GetWaypointSrv)
 
             # Create the publishers for sending speed and steering info to the car
             self.velocity_pub_dict = OrderedDict()
@@ -156,22 +164,26 @@ class DeepRacerRacetrackEnv(gym.Env):
                              **utils.build_system_error_dict(utils.SIMAPP_ENVIRONMENT_EXCEPTION,
                                                              utils.SIMAPP_EVENT_ERROR_CODE_500))
 
-            is_loop = np.all(waypoints[0,:] == waypoints[-1,:])
+            is_loop = np.all(waypoints[0, :] == waypoints[-1, :])
             if is_loop:
-                self.center_line = LinearRing(waypoints[:,0:2])
-                self.inner_border = LinearRing(waypoints[:,2:4])
-                self.outer_border = LinearRing(waypoints[:,4:6])
+                self.center_line = LinearRing(waypoints[:, 0:2])
+                self.inner_border = LinearRing(waypoints[:, 2:4])
+                self.outer_border = LinearRing(waypoints[:, 4:6])
+                self.left_lane = LinearRing((waypoints[:, 2:4] + waypoints[:, 0:2]) / 2)
+                self.right_lane = LinearRing((waypoints[:, 4:6] + waypoints[:, 0:2]) / 2)
                 self.road_poly = Polygon(self.outer_border, [self.inner_border])
             else:
-                self.center_line = LineString(waypoints[:,0:2])
-                self.inner_border = LineString(waypoints[:,2:4])
-                self.outer_border = LineString(waypoints[:,4:6])
+                self.center_line = LineString(waypoints[:, 0:2])
+                self.inner_border = LineString(waypoints[:, 2:4])
+                self.outer_border = LineString(waypoints[:, 4:6])
+                self.left_lane = LineString((waypoints[:, 2:4] + waypoints[:, 0:2]) / 2)
+                self.right_lane = LineString((waypoints[:, 4:6] + waypoints[:, 0:2]) / 2)
                 self.road_poly = Polygon(np.vstack((self.outer_border, np.flipud(self.inner_border))))
             self.center_dists = [self.center_line.project(Point(p), normalized=True) for p in self.center_line.coords[:-1]] + [1.0]
             self.track_length = self.center_line.length
             # Queue used to maintain image consumption synchronicity
             self.image_queue = queue.Queue(IMG_QUEUE_BUF_SIZE)
-            rospy.Subscriber('/camera/zed/rgb/image_rect_color', sensor_image, self.callback_image)
+            rospy.Subscriber('/racecar/camera/zed/rgb/image_rect_color', sensor_image, self.callback_image)
 
             # Initialize state data
             self.episodes = 0
@@ -198,7 +210,7 @@ class DeepRacerRacetrackEnv(gym.Env):
     def reset(self):
         if node_type == SAGEMAKER_TRAINING_WORKER:
             return self.observation_space.sample()
-        
+
         # Simulation is done - so RoboMaker will start to shut down the app.
         # Till RoboMaker shuts down the app, do nothing more else metrics may show unexpected data.
         if (node_type == SIMULATION_WORKER) and self.is_simulation_done:
@@ -240,6 +252,7 @@ class DeepRacerRacetrackEnv(gym.Env):
                 self.clear_forces_client(joint)
             prev_index, next_index = self.find_prev_next_waypoints(self.start_ndist)
             self.reset_car_client(self.start_ndist, next_index)
+
             # First clear the queue so that we set the state to the start image
             _ = self.image_queue.get(block=True, timeout=None)
             self.set_next_state()
@@ -283,7 +296,7 @@ class DeepRacerRacetrackEnv(gym.Env):
 
     def send_action(self, steering_angle, speed):
         # Simple v/r to computes the desired rpm
-        wheel_rpm = speed/WHEEL_RADIUS
+        wheel_rpm = speed / WHEEL_RADIUS
 
         for _, pub in self.velocity_pub_dict.items():
             pub.publish(wheel_rpm)
@@ -346,6 +359,8 @@ class DeepRacerRacetrackEnv(gym.Env):
         track_width = nearest_point_inner.distance(nearest_point_outer)
         is_left_of_center = (distance_from_outer < distance_from_inner) if self.reverse_dir \
             else (distance_from_inner < distance_from_outer)
+        
+#         print('model_state.pose.position.x=%.2f, model_point.x=%.2f' % (model_state.pose.position.x, model_point.x))
 
         # Convert current progress to be [0,100] starting at the initial waypoint
         if self.reverse_dir:
@@ -383,21 +398,23 @@ class DeepRacerRacetrackEnv(gym.Env):
                 'waypoints': list(self.center_line.coords),
                 'closest_waypoints': [prev_index, next_index],
                 'is_left_of_center': is_left_of_center,
-                'is_reversed': self.reverse_dir
+                'is_reversed': self.reverse_dir,
             }
             try:
                 reward = float(self.reward_function(params))
             except Exception as e:
                 utils.json_format_logger("Exception {} in customer reward function. Job failed!".format(e),
-                          **utils.build_user_error_dict(utils.SIMAPP_SIMULATION_WORKER_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_400))
+                                         **utils.build_user_error_dict(utils.SIMAPP_SIMULATION_WORKER_EXCEPTION,
+                                                                       utils.SIMAPP_EVENT_ERROR_CODE_400))
                 traceback.print_exc()
-                sys.exit(1)
+                os._exit(1)
         else:
             done = True
             reward = CRASHED
 
         # Reset if the car position hasn't changed in the last 2 steps
-        prev_pnt_dist = min(model_point.distance(self.prev_point), model_point.distance(self.prev_point_2))
+        prev_pnt_dist = min(model_point.distance(self.prev_point),
+                            model_point.distance(self.prev_point_2))
 
         if prev_pnt_dist <= 0.0001 and self.steps % NUM_STEPS_TO_CHECK_STUCK == 0:
             done = True
@@ -406,6 +423,7 @@ class DeepRacerRacetrackEnv(gym.Env):
         # Simulation jobs are done when progress reaches 100
         if current_progress >= 100:
             done = True
+            reward = 1e3
 
         # Keep data from the previous step around
         self.prev_point_2 = self.prev_point
@@ -467,7 +485,7 @@ class DeepRacerRacetrackEnv(gym.Env):
         # Update metrics based on job type
         if self.job_type == TRAINING_JOB:
             self.send_reward_to_cloudwatch(self.reward_in_episode)
-            self.update_training_metrics()
+            self.update_training_metrics(progress)
             self.write_metrics_to_s3()
             if self.is_training_done():
                 self.cancel_simulation_job()
@@ -476,12 +494,12 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.update_eval_metrics(progress)
             self.write_metrics_to_s3()
 
-    def set_checkpoint_num(self, checkpoint_num):
-        self.checkpoint_num = checkpoint_num
-    
+    def set_checkpoint_num(self, current_checkpoint):
+        self.checkpoint_num = current_checkpoint
+
     def update_eval_metrics(self, progress):
         eval_metric = {}
-        eval_metric['checkpoint_num'] = int(self.checkpoint_num)
+        eval_metric['checkpoint_num'] = self.checkpoint_num
         eval_metric['completion_percentage'] = int(progress)
         eval_metric['metric_time'] = int(round(time.time() * 1000))
         eval_metric['start_time'] = int(round(self.simulation_start_time * 1000))
@@ -489,8 +507,9 @@ class DeepRacerRacetrackEnv(gym.Env):
         eval_metric['trial'] = int(self.number_of_trials)
         self.metrics.append(eval_metric)
 
-    def update_training_metrics(self):
+    def update_training_metrics(self, progress):
         training_metric = {}
+        training_metric['progress'] = int(progress)
         training_metric['reward_score'] = int(round(self.reward_in_episode))
         training_metric['metric_time'] = int(round(time.time() * 1000))
         training_metric['start_time'] = int(round(self.simulation_start_time * 1000))
@@ -546,7 +565,7 @@ class DeepRacerRacetrackCustomActionSpaceEnv(DeepRacerRacetrackEnv):
         DeepRacerRacetrackEnv.__init__(self)
         try:
             # Try loading the custom model metadata (may or may not be present)
-            with open('./custom_files/model_metadata.json', 'r') as f:
+            with open('custom_files/model_metadata.json', 'r') as f:
                 model_metadata = json.load(f)
                 self.json_actions = model_metadata['action_space']
             logger.info("Loaded action space from file: {}".format(self.json_actions))
@@ -562,3 +581,4 @@ class DeepRacerRacetrackCustomActionSpaceEnv(DeepRacerRacetrackEnv):
         self.speed = float(self.json_actions[action]['speed'])
         self.action_taken = action
         return super().step([self.steering_angle, self.speed])
+
