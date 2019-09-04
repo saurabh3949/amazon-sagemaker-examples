@@ -2,16 +2,16 @@ from __future__ import print_function
 
 import bisect
 import boto3
-import datetime
 import json
 import logging
 import math
 import os
-import re
 import time
 import traceback
 import sys
 from collections import OrderedDict
+import threading
+import datetime
 
 import gym
 import queue
@@ -21,7 +21,6 @@ from PIL import Image
 from markov import utils
 
 logger = utils.Logger(__name__, logging.INFO).get_logger()
-logger.info("*********** ENV from SimApp **********************")
 
 # Type of worker
 SIMULATION_WORKER = "SIMULATION_WORKER"
@@ -32,14 +31,13 @@ if node_type == SIMULATION_WORKER:
     import rospy
     from std_msgs.msg import Float64
     from gazebo_msgs.msg import ModelState
-    from gazebo_msgs.srv import GetLinkState, GetModelState, JointRequest, SetModelState, SpawnModel
-    from geometry_msgs.msg import Pose
+    from gazebo_msgs.srv import GetLinkState, GetModelState, JointRequest
     from scipy.spatial.transform import Rotation
     from sensor_msgs.msg import Image as sensor_image
-    from rosgraph_msgs.msg import Clock as clock
     from shapely.geometry import Point, Polygon
     from shapely.geometry.polygon import LinearRing, LineString
     from deepracer_simulation_environment.srv import GetWaypointSrv, ResetCarSrv
+    from markov.s3_simdata_upload import DeepRacerRacetrackSimTraceData
 
 # Type of job
 TRAINING_JOB = 'TRAINING'
@@ -72,12 +70,9 @@ STEERING_TOPICS = ['/racecar/left_steering_hinge_position_controller/command',
                    '/racecar/right_steering_hinge_position_controller/command']
 
 # List of all effort joints
-EFFORT_JOINTS = ['/racecar/left_rear_wheel_joint',
-                 '/racecar/right_rear_wheel_joint',
-                 '/racecar/left_front_wheel_joint',
-                 '/racecar/right_front_wheel_joint',
-                 '/racecar/left_steering_hinge_joint',
-                 '/racecar/right_steering_hinge_joint']
+EFFORT_JOINTS = ['/racecar/left_rear_wheel_joint', '/racecar/right_rear_wheel_joint',
+                 '/racecar/left_front_wheel_joint','/racecar/right_front_wheel_joint',
+                 '/racecar/left_steering_hinge_joint','/racecar/right_steering_hinge_joint']
 # Radius of the wheels of the car in meters
 WHEEL_RADIUS = 0.1
 
@@ -86,6 +81,29 @@ WHEEL_RADIUS = 0.1
 # step rate.
 NUM_STEPS_TO_CHECK_STUCK = 15
 
+#Defines to upload SIM_TRACE data in S3
+TRAINING_SIMTRACE_DATA_S3_OBJECT_KEY = "sim_inference_logs/TrainingSimTraceData.csv"
+EVALUATION_SIMTRACE_DATA_S3_OBJECT_KEY = "sim_inference_logs/EvaluationSimTraceData.csv"
+SIMAPP_DATA_UPLOAD_TIME_TO_S3 = 300 #in seconds
+simapp_data_upload_timer = None
+
+def simapp_shutdown():
+    #This function is called on simapp exit. This is called on:
+    #  -robomaker expiry shutdown
+    #  -an unexpected exception in the simapp leading to system exit.
+    #  -cancel_simulation_job
+    #  -simulation data upload timer expiry
+    logger.info("deepracer_racetrack_env - Shutdown simapp, close the running processes.")
+    stack_trace = traceback.format_exc()
+    logger.info ("deepracer_racetrack_env - callstack={}".format(stack_trace))
+    if node_type == SIMULATION_WORKER:
+        simtrace_data = DeepRacerRacetrackSimTraceData.getInstance()
+        simtrace_data.complete_upload_to_s3()
+
+def simapp_data_upload_timer_expiry():
+    logger.info("deepracer_racetrack_env - simapp_data_upload timer expired")
+    simapp_data_upload_timer.cancel()
+    simapp_shutdown()
 
 ### Gym Env ###
 class DeepRacerRacetrackEnv(gym.Env):
@@ -108,16 +126,17 @@ class DeepRacerRacetrackEnv(gym.Env):
             rospy.wait_for_service('/deepracer_simulation_environment/get_waypoints')
             rospy.wait_for_service('/deepracer_simulation_environment/reset_car')
             rospy.wait_for_service('/gazebo/get_model_state')
-
             rospy.wait_for_service('/gazebo/get_link_state')
             rospy.wait_for_service('/gazebo/clear_joint_forces')
-            rospy.wait_for_service('/gazebo/spawn_urdf_model')
 
             self.get_model_state = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
             self.get_link_state = rospy.ServiceProxy('/gazebo/get_link_state', GetLinkState)
-            self.clear_forces_client = rospy.ServiceProxy('/gazebo/clear_joint_forces', JointRequest)
-            self.reset_car_client = rospy.ServiceProxy('/deepracer_simulation_environment/reset_car', ResetCarSrv)
-            get_waypoints_client = rospy.ServiceProxy('/deepracer_simulation_environment/get_waypoints', GetWaypointSrv)
+            self.clear_forces_client = rospy.ServiceProxy('/gazebo/clear_joint_forces',
+                                                          JointRequest)
+            self.reset_car_client = rospy.ServiceProxy('/deepracer_simulation_environment/reset_car',
+                                                       ResetCarSrv)
+            get_waypoints_client = rospy.ServiceProxy('/deepracer_simulation_environment/get_waypoints',
+                                                      GetWaypointSrv)
 
             # Create the publishers for sending speed and steering info to the car
             self.velocity_pub_dict = OrderedDict()
@@ -140,12 +159,12 @@ class DeepRacerRacetrackEnv(gym.Env):
                                       rospy.get_param('ROBOMAKER_SIMULATION_JOB_ACCOUNT_ID') + \
                                       ':simulation-job/' + rospy.get_param('AWS_ROBOMAKER_SIMULATION_JOB_ID')
 
+            # Setup SIM_TRACE_LOG data upload to s3
+            self.setup_simtrace_data_upload_to_s3()
+
             if self.job_type == TRAINING_JOB:
                 from custom_files.customer_reward_function import reward_function
                 self.reward_function = reward_function
-                self.metric_name = rospy.get_param('METRIC_NAME')
-                self.metric_namespace = rospy.get_param('METRIC_NAMESPACE')
-                self.training_job_arn = rospy.get_param('TRAINING_JOB_ARN')
                 self.target_number_of_episodes = rospy.get_param('NUMBER_OF_EPISODES')
                 self.target_reward_score = rospy.get_param('TARGET_REWARD_SCORE')
             else:
@@ -164,26 +183,22 @@ class DeepRacerRacetrackEnv(gym.Env):
                              **utils.build_system_error_dict(utils.SIMAPP_ENVIRONMENT_EXCEPTION,
                                                              utils.SIMAPP_EVENT_ERROR_CODE_500))
 
-            is_loop = np.all(waypoints[0, :] == waypoints[-1, :])
+            is_loop = np.all(waypoints[0,:] == waypoints[-1,:])
             if is_loop:
-                self.center_line = LinearRing(waypoints[:, 0:2])
-                self.inner_border = LinearRing(waypoints[:, 2:4])
-                self.outer_border = LinearRing(waypoints[:, 4:6])
-                self.left_lane = LinearRing((waypoints[:, 2:4] + waypoints[:, 0:2]) / 2)
-                self.right_lane = LinearRing((waypoints[:, 4:6] + waypoints[:, 0:2]) / 2)
+                self.center_line = LinearRing(waypoints[:,0:2])
+                self.inner_border = LinearRing(waypoints[:,2:4])
+                self.outer_border = LinearRing(waypoints[:,4:6])
                 self.road_poly = Polygon(self.outer_border, [self.inner_border])
             else:
-                self.center_line = LineString(waypoints[:, 0:2])
-                self.inner_border = LineString(waypoints[:, 2:4])
-                self.outer_border = LineString(waypoints[:, 4:6])
-                self.left_lane = LineString((waypoints[:, 2:4] + waypoints[:, 0:2]) / 2)
-                self.right_lane = LineString((waypoints[:, 4:6] + waypoints[:, 0:2]) / 2)
+                self.center_line = LineString(waypoints[:,0:2])
+                self.inner_border = LineString(waypoints[:,2:4])
+                self.outer_border = LineString(waypoints[:,4:6])
                 self.road_poly = Polygon(np.vstack((self.outer_border, np.flipud(self.inner_border))))
             self.center_dists = [self.center_line.project(Point(p), normalized=True) for p in self.center_line.coords[:-1]] + [1.0]
             self.track_length = self.center_line.length
             # Queue used to maintain image consumption synchronicity
             self.image_queue = queue.Queue(IMG_QUEUE_BUF_SIZE)
-            rospy.Subscriber('/racecar/camera/zed/rgb/image_rect_color', sensor_image, self.callback_image)
+            rospy.Subscriber('/camera/zed/rgb/image_rect_color', sensor_image, self.callback_image)
 
             # Initialize state data
             self.episodes = 0
@@ -206,6 +221,44 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.simulation_start_time = 0
             self.allow_servo_step_signals = False
             self.checkpoint_num = 0
+
+    def setup_simtrace_data_upload_to_s3(self):
+        if node_type == SIMULATION_WORKER:
+            #start timer to upload SIM_TRACE data to s3 when simapp exits
+            #There is not enough time to upload data to S3 when robomaker shuts down
+            #Set up timer to upload data to S3 300 seconds before the robomaker quits
+            # - 300 seocnds is randomly chosen number based on various jobs launched that
+            #   provides enough time to upload data to S3
+            global simapp_data_upload_timer
+            session = boto3.session.Session()
+            robomaker_client = session.client('robomaker', region_name=self.aws_region)
+            result = robomaker_client.describe_simulation_job(
+                job=self.simulation_job_arn
+            )
+            logger.info("robomaker job description: {}".format(result))
+            self.simapp_upload_duration = result['maxJobDurationInSeconds'] - SIMAPP_DATA_UPLOAD_TIME_TO_S3
+            start = 0
+            if self.job_type == TRAINING_JOB:
+                logger.info("simapp training job started_at={}".format(result['lastStartedAt']))
+                start = result['lastStartedAt']
+                self.simtrace_s3_bucket = rospy.get_param('SAGEMAKER_SHARED_S3_BUCKET')
+                self.simtrace_s3_key = os.path.join(rospy.get_param('SAGEMAKER_SHARED_S3_PREFIX'), TRAINING_SIMTRACE_DATA_S3_OBJECT_KEY)
+            else:
+                logger.info("simapp evaluation job started_at={}".format(result['lastUpdatedAt']))
+                start = result['lastUpdatedAt']
+                self.simtrace_s3_bucket = rospy.get_param('MODEL_S3_BUCKET')
+                self.simtrace_s3_key = os.path.join(rospy.get_param('MODEL_S3_PREFIX'), EVALUATION_SIMTRACE_DATA_S3_OBJECT_KEY)
+            end = start + datetime.timedelta(seconds=self.simapp_upload_duration)
+            now = datetime.datetime.now(tz=end.tzinfo) # use tzinfo as robomaker
+            self.simapp_data_upload_time = (end - now).total_seconds()
+            logger.info("simapp job started_at={} now={} end={} upload_data_in={} sec".format(start, now, end, self.simapp_data_upload_time))
+            simapp_data_upload_timer = threading.Timer(self.simapp_data_upload_time, simapp_data_upload_timer_expiry)
+            simapp_data_upload_timer.daemon = True
+            simapp_data_upload_timer.start()
+            logger.info("Timer with {} seconds is {}".format(self.simapp_data_upload_time, simapp_data_upload_timer.is_alive()))
+
+            #setup to upload SIM_TRACE_DATA to S3
+            self.simtrace_data = DeepRacerRacetrackSimTraceData(self.simtrace_s3_bucket, self.simtrace_s3_key)
 
     def reset(self):
         if node_type == SAGEMAKER_TRAINING_WORKER:
@@ -252,7 +305,6 @@ class DeepRacerRacetrackEnv(gym.Env):
                 self.clear_forces_client(joint)
             prev_index, next_index = self.find_prev_next_waypoints(self.start_ndist)
             self.reset_car_client(self.start_ndist, next_index)
-
             # First clear the queue so that we set the state to the start image
             _ = self.image_queue.get(block=True, timeout=None)
             self.set_next_state()
@@ -276,7 +328,7 @@ class DeepRacerRacetrackEnv(gym.Env):
 
         # Send this action to Gazebo and increment the step count
         self.steering_angle = float(action[0])
-        self.speed = float(action[1])
+        self.speed = max(float(0.0), float(action[1]))
         if self.allow_servo_step_signals:
             self.send_action(self.steering_angle, self.speed)
         self.steps += 1
@@ -296,7 +348,7 @@ class DeepRacerRacetrackEnv(gym.Env):
 
     def send_action(self, steering_angle, speed):
         # Simple v/r to computes the desired rpm
-        wheel_rpm = speed / WHEEL_RADIUS
+        wheel_rpm = speed/WHEEL_RADIUS
 
         for _, pub in self.velocity_pub_dict.items():
             pub.publish(wheel_rpm)
@@ -359,8 +411,6 @@ class DeepRacerRacetrackEnv(gym.Env):
         track_width = nearest_point_inner.distance(nearest_point_outer)
         is_left_of_center = (distance_from_outer < distance_from_inner) if self.reverse_dir \
             else (distance_from_inner < distance_from_outer)
-        
-#         print('model_state.pose.position.x=%.2f, model_point.x=%.2f' % (model_state.pose.position.x, model_point.x))
 
         # Convert current progress to be [0,100] starting at the initial waypoint
         if self.reverse_dir:
@@ -382,6 +432,7 @@ class DeepRacerRacetrackEnv(gym.Env):
         any_wheels_on_track = any(wheel_on_track)
 
         # Compute the reward
+        reward = 0.0
         if any_wheels_on_track:
             done = False
             params = {
@@ -398,7 +449,7 @@ class DeepRacerRacetrackEnv(gym.Env):
                 'waypoints': list(self.center_line.coords),
                 'closest_waypoints': [prev_index, next_index],
                 'is_left_of_center': is_left_of_center,
-                'is_reversed': self.reverse_dir,
+                'is_reversed': self.reverse_dir
             }
             try:
                 reward = float(self.reward_function(params))
@@ -407,14 +458,13 @@ class DeepRacerRacetrackEnv(gym.Env):
                                          **utils.build_user_error_dict(utils.SIMAPP_SIMULATION_WORKER_EXCEPTION,
                                                                        utils.SIMAPP_EVENT_ERROR_CODE_400))
                 traceback.print_exc()
-                os._exit(1)
+                utils.simapp_exit_gracefully()
         else:
             done = True
             reward = CRASHED
 
         # Reset if the car position hasn't changed in the last 2 steps
-        prev_pnt_dist = min(model_point.distance(self.prev_point),
-                            model_point.distance(self.prev_point_2))
+        prev_pnt_dist = min(model_point.distance(self.prev_point), model_point.distance(self.prev_point_2))
 
         if prev_pnt_dist <= 0.0001 and self.steps % NUM_STEPS_TO_CHECK_STUCK == 0:
             done = True
@@ -423,7 +473,6 @@ class DeepRacerRacetrackEnv(gym.Env):
         # Simulation jobs are done when progress reaches 100
         if current_progress >= 100:
             done = True
-            reward = 1e3
 
         # Keep data from the previous step around
         self.prev_point_2 = self.prev_point
@@ -449,6 +498,25 @@ class DeepRacerRacetrackEnv(gym.Env):
             closest_waypoint_index,
             self.track_length,
             time.time()))
+
+        #build json record of the reward metrics
+        reward_metrics = OrderedDict()
+        reward_metrics['episode'] = self.episodes
+        reward_metrics['steps'] = self.steps
+        reward_metrics['X'] = model_location[0]
+        reward_metrics['Y'] = model_location[1]
+        reward_metrics['yaw'] = model_heading
+        reward_metrics['steer'] = self.steering_angle
+        reward_metrics['throttle'] = self.speed
+        reward_metrics['action'] = self.action_taken
+        reward_metrics['reward'] = self.reward
+        reward_metrics['done'] = self.done
+        reward_metrics['all_wheels_on_track'] = all_wheels_on_track
+        reward_metrics['progress'] = current_progress
+        reward_metrics['closest_waypoint'] = closest_waypoint_index
+        reward_metrics['track_len'] = self.track_length
+        reward_metrics['tstamp'] = time.time()
+        self.simtrace_data.write_simtrace_data(reward_metrics)
 
         # Terminate this episode when ready
         if done and node_type == SIMULATION_WORKER:
@@ -482,9 +550,11 @@ class DeepRacerRacetrackEnv(gym.Env):
         # Reset the car
         self.stop_car()
 
+        # upload SIM_TRACE data to S3
+        self.simtrace_data.upload_to_s3(self.episodes)
+
         # Update metrics based on job type
         if self.job_type == TRAINING_JOB:
-            self.send_reward_to_cloudwatch(self.reward_in_episode)
             self.update_training_metrics(progress)
             self.write_metrics_to_s3()
             if self.is_training_done():
@@ -509,12 +579,13 @@ class DeepRacerRacetrackEnv(gym.Env):
 
     def update_training_metrics(self, progress):
         training_metric = {}
-        training_metric['progress'] = int(progress)
+        training_metric['checkpoint_num'] = self.checkpoint_num
         training_metric['reward_score'] = int(round(self.reward_in_episode))
         training_metric['metric_time'] = int(round(time.time() * 1000))
         training_metric['start_time'] = int(round(self.simulation_start_time * 1000))
         training_metric['elapsed_time_in_milliseconds'] = int(round((time.time() - self.simulation_start_time) * 1000))
         training_metric['episode'] = int(self.episodes)
+        training_metric['completion_percentage'] = int(progress)
         self.metrics.append(training_metric)
 
     def write_metrics_to_s3(self):
@@ -534,30 +605,13 @@ class DeepRacerRacetrackEnv(gym.Env):
         return self.is_simulation_done
 
     def cancel_simulation_job(self):
+        logger.info ("cancel_simulation_job: make sure to shutdown simapp first")
+        simapp_shutdown()
+
         session = boto3.session.Session()
         robomaker_client = session.client('robomaker', region_name=self.aws_region)
         robomaker_client.cancel_simulation_job(
             job=self.simulation_job_arn
-        )
-
-    def send_reward_to_cloudwatch(self, reward):
-        session = boto3.session.Session()
-        cloudwatch_client = session.client('cloudwatch', region_name=self.aws_region)
-        cloudwatch_client.put_metric_data(
-            MetricData=[
-                {
-                    'MetricName': self.metric_name,
-                    'Dimensions': [
-                        {
-                            'Name': 'TRAINING_JOB_ARN',
-                            'Value': self.training_job_arn
-                        },
-                    ],
-                    'Unit': 'None',
-                    'Value': reward
-                },
-            ],
-            Namespace=self.metric_namespace
         )
 
 class DeepRacerRacetrackCustomActionSpaceEnv(DeepRacerRacetrackEnv):
@@ -581,4 +635,3 @@ class DeepRacerRacetrackCustomActionSpaceEnv(DeepRacerRacetrackEnv):
         self.speed = float(self.json_actions[action]['speed'])
         self.action_taken = action
         return super().step([self.steering_angle, self.speed])
-
