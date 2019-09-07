@@ -9,12 +9,19 @@ def reward_function(params):
 
     reward = 1e-3
     if distance_from_center <= marker_1:
-        reward = 1
+        reward = 2
     elif distance_from_center <= marker_2:
-        reward = 0.5
+        reward = 1
     elif distance_from_center <= marker_3:
-        reward = 0.1
+        reward = 0.5
     else:
-        reward = 1e-3  # likely crashed/ close to off track
+        reward = -1  # likely crashed/ close to off track
 
+#     if params['speed'] < 2.0:
+#         if reward > 0:
+#             reward *= 0.5
+#     if params['steering_angle'] > 15:
+#         if reward > 0:
+#             reward *= 0.5
+        
     return float(reward)
