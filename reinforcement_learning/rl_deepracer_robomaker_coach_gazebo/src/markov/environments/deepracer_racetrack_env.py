@@ -205,7 +205,9 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.start_ndist = 0.0
             self.reverse_dir = False
             self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
-            self.alternate_dir = rospy.get_param('ALTERNATE_DRIVING_DIRECTION', False)
+            self.alternate_dir = bool(rospy.get_param('ALTERNATE_DRIVING_DIRECTION', False))
+            print("Alternate direction is set to:", self.alternate_dir)
+            
             self.is_simulation_done = False
             self.steering_angle = 0
             self.speed = 0
