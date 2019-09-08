@@ -21,7 +21,7 @@ from google.protobuf import text_format
 from tensorflow.python.training.checkpoint_state_pb2 import CheckpointState
 
 
-
+from s3_helper.s3_client import SageS3Client
 
 from rl_coach.base_parameters import TaskParameters, DistributedCoachSynchronizationType
 from rl_coach.core_types import RunPhase, EnvironmentEpisodes, EnvironmentSteps
@@ -34,10 +34,19 @@ from rl_coach.utils import short_dynamic_import
 from gym.envs.registration import register
 from gym.envs.registration import make
 
-CUSTOM_FILES_PATH = "./custom_files"
-if not os.path.exists(CUSTOM_FILES_PATH):
-    os.makedirs(CUSTOM_FILES_PATH)
 
+CUSTOM_FILES_PATH = "./custom_files"
+dirs_to_create = ["./custom_files",
+                  "./custom_files/markov",
+                  "./custom_files/markov/actions",
+                  "./custom_files/markov/presets",
+                  "./custom_files/markov/environments",
+                  "./custom_files/markov/rewards"
+                  ]
+
+for path in dirs_to_create:
+    if not os.path.exists(path):
+        os.makedirs(path)
 
 # Q: specify alternative distributed memory, or should this go in the preset?
 # A: preset must define distributed memory to be used. we aren't going to take
@@ -183,10 +192,6 @@ def rollout_worker(graph_manager, checkpoint_dir, data_store, num_workers, memor
                             agent.memory.memory_backend.set_current_checkpoint(current_checkpoint)
 
 
-
-
-
-
 screen.set_use_colors(False)
 
 parser = argparse.ArgumentParser()
@@ -230,31 +235,21 @@ parser.add_argument('--model_metadata_s3_key',
 args = parser.parse_args()
 
 
-os.system("aws s3 cp s3://%s/%s/markov/ ./custom_files/markov --recursive" % (args.s3_bucket, args.s3_prefix))
-
 print("All env vars:", os.environ)
 
-
+s3_client = SageS3Client(bucket=args.s3_bucket, s3_prefix=args.s3_prefix, aws_region=args.aws_region)
 
 import markov.deepracer_memory_multi as deepracer_memory
-
 import markov
-
 print("Markov path:", markov.__file__)
-
-
 import markov.defaults as defaults
 from markov.s3_boto_data_store import S3BotoDataStore, S3BotoDataStoreParameters
-from markov.s3_client import SageS3Client
 
 from markov.utils import load_model_metadata
 from markov import utils
 
 logger = utils.Logger(__name__, logging.INFO).get_logger()
 
-
-
-s3_client = SageS3Client(bucket=args.s3_bucket, s3_prefix=args.s3_prefix, aws_region=args.aws_region)
 logger.info("S3 bucket: %s" % args.s3_bucket)
 logger.info("S3 prefix: %s" % args.s3_prefix)
 

@@ -4,14 +4,16 @@ import os
 import io
 import json
 import time
+import sys
 
 from google.protobuf import text_format
 from tensorflow.python.training.checkpoint_state_pb2 import CheckpointState
 
 import logging
-from markov import utils
+logging.basicConfig(level=logging.INFO)
 
-logger = utils.Logger(__name__, logging.INFO).get_logger()
+logger = logging.getLogger("SageS3Client")
+
 
 class SageS3Client():
     def __init__(self, bucket=None, s3_prefix=None, aws_region=None):
@@ -19,6 +21,7 @@ class SageS3Client():
         self.bucket = bucket
         self.s3_prefix = s3_prefix
         self.config_key = os.path.normpath(s3_prefix + "/ip/ip.json")
+        self.markov_prefix = os.path.normpath(s3_prefix + "/markov")
         self.hyperparameters_key = os.path.normpath(s3_prefix + "/ip/hyperparameters.json")
         self.done_file_key = os.path.normpath(s3_prefix + "/ip/done")
         self.model_checkpoints_prefix = os.path.normpath(s3_prefix + "/model/") + "/"
@@ -31,6 +34,19 @@ class SageS3Client():
 
     def _get_s3_key(self, key):
         return os.path.normpath(self.model_checkpoints_prefix + "/" + key)
+
+    def download_markov(self):
+        s3_client = self.get_client()
+        response = s3_client.list_objects_v2(Bucket=self.bucket,
+                                             Prefix=self.markov_prefix)
+        if "Contents" in response:
+            for i in response["Contents"]:
+                if ".ipynb_checkpoints" in i["Key"]:
+                    continue
+                s3_client.download_file(Bucket=self.bucket,
+                                        Key=i["Key"],
+                                        Filename=i["Key"].replace(self.markov_prefix,"./custom_files/markov"))
+                logger.info("Downloaded %s" % i["Key"])
 
     def write_ip_config(self, ip):
         s3_client = self.get_client()
@@ -104,8 +120,7 @@ class SageS3Client():
                         return True
 
         except Exception as e:
-            util.json_format_logger ("{} while downloading the model {} from S3".format(e, filename),
-                     **util.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_500))
+            logger.error("{} while downloading the model {} from S3".format(e, filename))
             return False
 
     def get_ip(self):
@@ -117,8 +132,7 @@ class SageS3Client():
                 ip = json.load(f)["IP"]
             return ip
         except Exception as e:
-            utils.json_format_logger("Exception [{}] occured, Cannot fetch IP of redis server running in SageMaker. Job failed!".format(e),
-                        **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_503))
+            logger.error("Exception [{}] occured, Cannot fetch IP of redis server running in SageMaker. Job failed!".format(e))
             sys.exit(1)
 
     def _wait_for_ip_upload(self, timeout=600):
@@ -132,9 +146,7 @@ class SageS3Client():
                 if time_elapsed % 5 == 0:
                     logger.info ("Waiting for SageMaker Redis server IP... Time elapsed: %s seconds" % time_elapsed)
                 if time_elapsed >= timeout:
-                    #raise RuntimeError("Cannot retrieve IP of redis server running in SageMaker")
-                    utils.json_format_logger("Cannot retrieve IP of redis server running in SageMaker. Job failed!",
-                        **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_503))
+                    logger.error("Cannot retrieve IP of redis server running in SageMaker. Job failed!")
                     sys.exit(1)
             else:
                 return
@@ -149,13 +161,11 @@ class SageS3Client():
                 logger.info("Exception [{}] occured on download file-{} from s3 bucket-{} key-{}".format(e.response['Error'], local_path, self.bucket, s3_key))
                 return False
             else:
-                utils.json_format_logger("boto client exception error [{}] occured on download file-{} from s3 bucket-{} key-{}"
-                            .format(e.response['Error'], local_path, self.bucket, s3_key),
-                            **utils.build_user_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_401))
+                logger.error("boto client exception error [{}] occured on download file-{} from s3 bucket-{} key-{}"
+                            .format(e.response['Error'], local_path, self.bucket, s3_key))
                 return False
         except Exception as e:
-            utils.json_format_logger("Exception [{}] occcured on download file-{} from s3 bucket-{} key-{}".format(e, local_path, self.bucket, s3_key),
-                        **utils.build_user_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_401))
+            logger.error("Exception [{}] occcured on download file-{} from s3 bucket-{} key-{}".format(e, local_path, self.bucket, s3_key))
             return False
 
     def upload_file(self, s3_key, local_path):
@@ -166,6 +176,27 @@ class SageS3Client():
                                   Key=s3_key)
             return True
         except Exception as e:
-            utils.json_format_logger("{} on upload file-{} to s3 bucket-{} key-{}".format(e, local_path, self.bucket, s3_key),
-                        **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_500))
+            logger.error("{} on upload file-{} to s3 bucket-{} key-{}".format(e, local_path, self.bucket, s3_key))
             return False
+
+
+if __name__ == '__main__':
+
+    CUSTOM_FILES_PATH = "./custom_files"
+    dirs_to_create = ["./custom_files",
+                    "./custom_files/markov",
+                    "./custom_files/markov/actions",
+                    "./custom_files/markov/presets",
+                    "./custom_files/markov/environments",
+                    "./custom_files/markov/rewards"
+                    ]
+
+    for path in dirs_to_create:
+        if not os.path.exists(path):
+            os.makedirs(path)
+    s3_bucket = os.environ.get("SAGEMAKER_SHARED_S3_BUCKET", "gsaur-test")
+    s3_prefix = os.environ.get("SAGEMAKER_SHARED_S3_PREFIX", "sagemaker")
+    aws_region = os.environ.get("APP_REGION", "us-east-1")
+    s3_client = SageS3Client(bucket=s3_bucket, s3_prefix=s3_prefix, aws_region=aws_region)
+    s3_client.download_markov()
+    
