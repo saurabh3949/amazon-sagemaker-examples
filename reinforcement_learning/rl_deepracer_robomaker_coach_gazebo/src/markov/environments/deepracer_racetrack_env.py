@@ -206,7 +206,7 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.reverse_dir = False
             # self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
             self.change_start = bool(rospy.get_param('CHANGE_START_POSITION', True))
-            self.alternate_dir = bool(rospy.get_param('ALTERNATE_DRIVING_DIRECTION', False))
+            self.alternate_dir = bool(rospy.get_param('ALTERNATE_DRIVING_DIRECTION', True))
             print("Alternate direction is set to:", self.alternate_dir)
             
             self.is_simulation_done = False
@@ -545,9 +545,12 @@ class DeepRacerRacetrackEnv(gym.Env):
 
     def finish_episode(self, progress):
         # Increment episode count, update start position and direction
-        self.episodes += 1
+        self.episodes += 1            
         if self.change_start:
-            self.start_ndist = (self.start_ndist + ROUND_ROBIN_ADVANCE_DIST) % 1.0
+            if self.job_type == TRAINING_JOB:
+                self.start_ndist = (self.start_ndist + ROUND_ROBIN_ADVANCE_DIST) % 1.0
+            else:
+                self.start_ndist = (self.start_ndist + 2*ROUND_ROBIN_ADVANCE_DIST) % 1.0
         if self.alternate_dir:
             self.reverse_dir = not self.reverse_dir
         # Reset the car

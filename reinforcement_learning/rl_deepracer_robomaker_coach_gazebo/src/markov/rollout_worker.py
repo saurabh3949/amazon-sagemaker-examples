@@ -161,6 +161,7 @@ def rollout_worker(graph_manager, checkpoint_dir, data_store, num_workers, memor
         # act_steps = math.ceil((graph_manager.agent_params.algorithm.num_consecutive_playing_steps.num_steps) / num_workers)
         act_steps = 1
         current_checkpoint = get_latest_checkpoint(checkpoint_dir)
+        graph_manager.top_level_manager.environment.env.env.set_checkpoint_num(current_checkpoint)
         for level in graph_manager.level_managers:
             for agent in level.agents.values():
                 agent.memory.memory_backend.set_current_checkpoint(current_checkpoint)
@@ -195,6 +196,7 @@ def rollout_worker(graph_manager, checkpoint_dir, data_store, num_workers, memor
                     data_store.load_from_store(expected_checkpoint_number=latest_checkpoint)
                     graph_manager.restore_checkpoint()
                     current_checkpoint = get_latest_checkpoint(checkpoint_dir)
+                    graph_manager.top_level_manager.environment.env.env.set_checkpoint_num(current_checkpoint)
                     for level in graph_manager.level_managers:
                         for agent in level.agents.values():
                             agent.memory.memory_backend.set_current_checkpoint(current_checkpoint)
