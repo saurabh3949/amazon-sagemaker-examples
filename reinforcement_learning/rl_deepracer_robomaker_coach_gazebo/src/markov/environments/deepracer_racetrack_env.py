@@ -37,7 +37,7 @@ if node_type == SIMULATION_WORKER:
     from shapely.geometry import Point, Polygon
     from shapely.geometry.polygon import LinearRing, LineString
     from deepracer_simulation_environment.srv import GetWaypointSrv, ResetCarSrv
-    from markov.s3_simdata_upload import DeepRacerRacetrackSimTraceData
+    # from markov.s3_simdata_upload import DeepRacerRacetrackSimTraceData
 
 # Type of job
 TRAINING_JOB = 'TRAINING'
@@ -96,9 +96,9 @@ def simapp_shutdown():
     logger.info("deepracer_racetrack_env - Shutdown simapp, close the running processes.")
     stack_trace = traceback.format_exc()
     logger.info ("deepracer_racetrack_env - callstack={}".format(stack_trace))
-    if node_type == SIMULATION_WORKER:
-        simtrace_data = DeepRacerRacetrackSimTraceData.getInstance()
-        simtrace_data.complete_upload_to_s3()
+    # if node_type == SIMULATION_WORKER:
+        # simtrace_data = DeepRacerRacetrackSimTraceData.getInstance()
+        # simtrace_data.complete_upload_to_s3()
 
 def simapp_data_upload_timer_expiry():
     logger.info("deepracer_racetrack_env - simapp_data_upload timer expired")
@@ -160,7 +160,7 @@ class DeepRacerRacetrackEnv(gym.Env):
                                       ':simulation-job/' + rospy.get_param('AWS_ROBOMAKER_SIMULATION_JOB_ID')
 
             # Setup SIM_TRACE_LOG data upload to s3
-            self.setup_simtrace_data_upload_to_s3()
+            # self.setup_simtrace_data_upload_to_s3()
 
             if self.job_type == TRAINING_JOB:
                 from custom_files.customer_reward_function import reward_function
@@ -518,7 +518,7 @@ class DeepRacerRacetrackEnv(gym.Env):
         reward_metrics['closest_waypoint'] = closest_waypoint_index
         reward_metrics['track_len'] = self.track_length
         reward_metrics['tstamp'] = time.time()
-        self.simtrace_data.write_simtrace_data(reward_metrics)
+        # self.simtrace_data.write_simtrace_data(reward_metrics)
 
         # Terminate this episode when ready
         if done and node_type == SIMULATION_WORKER:
@@ -553,7 +553,7 @@ class DeepRacerRacetrackEnv(gym.Env):
         self.stop_car()
 
         # upload SIM_TRACE data to S3
-        self.simtrace_data.upload_to_s3(self.episodes)
+        # self.simtrace_data.upload_to_s3(self.episodes)
 
         # Update metrics based on job type
         if self.job_type == TRAINING_JOB:
