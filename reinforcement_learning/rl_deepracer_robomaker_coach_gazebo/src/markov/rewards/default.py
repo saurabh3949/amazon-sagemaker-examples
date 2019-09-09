@@ -15,7 +15,7 @@ def reward_function(params):
     elif distance_from_center <= marker_3:
         reward = 0.5
     else:
-        reward = -1  # likely crashed/ close to off track
+        reward = 1e-3  # likely crashed/ close to off track
 
 #     if params['speed'] < 2.0:
 #         if reward > 0:
