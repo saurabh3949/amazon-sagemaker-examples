@@ -23,6 +23,7 @@ SIMAPP_EVENT_USER_ERROR = "user_error"
 
 SIMAPP_EVENT_ERROR_CODE_500 = "500"
 SIMAPP_EVENT_ERROR_CODE_400 = "400"
+SIMAPP_EVENT_ERROR_CODE_503 = "503"
 
 class Logger(object):
     counter = 0

@@ -194,7 +194,7 @@ def rollout_worker(graph_manager, checkpoint_dir, data_store, num_workers, memor
 
                     data_store.load_from_store(expected_checkpoint_number=latest_checkpoint)
                     graph_manager.restore_checkpoint()
-                    current_checkpoint = latest_checkpoint
+                    current_checkpoint = get_latest_checkpoint(checkpoint_dir)
                     for level in graph_manager.level_managers:
                         for agent in level.agents.values():
                             agent.memory.memory_backend.set_current_checkpoint(current_checkpoint)

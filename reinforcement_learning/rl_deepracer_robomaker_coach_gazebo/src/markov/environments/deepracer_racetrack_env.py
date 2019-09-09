@@ -204,7 +204,8 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.episodes = 0
             self.start_ndist = 0.0
             self.reverse_dir = False
-            self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
+            # self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
+            self.change_start = bool(rospy.get_param('CHANGE_START_POSITION', True))
             self.alternate_dir = bool(rospy.get_param('ALTERNATE_DRIVING_DIRECTION', False))
             print("Alternate direction is set to:", self.alternate_dir)
             

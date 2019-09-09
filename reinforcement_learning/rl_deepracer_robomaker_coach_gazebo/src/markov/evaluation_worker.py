@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 import json
+from collections import Counter
 
 import markov.environments
 from markov.s3_client import SageS3Client
@@ -66,13 +67,14 @@ def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
 
     data_store = graph_manager.data_store
 
+    episodes_counter = Counter()
+
     try:
         # This will only work for DeepRacerRacetrackEnv enviroments
         graph_manager.top_level_manager.environment.env.env.set_allow_servo_step_signals(True)
     except Exception as ex:
         print("[ERROR] Method not defined in enviroment class: {}".format(ex))
 
-    curr_num_trials = 0
 
     while True:
         # Get current checkpoint number
@@ -81,15 +83,15 @@ def evaluation_worker(graph_manager, number_of_trials, local_model_directory):
         # Register the checkpoint with the environment for logging
         graph_manager.top_level_manager.environment.env.env.set_checkpoint_num(current_checkpoint)
 
-        graph_manager.evaluate(EnvironmentEpisodes(1))
-        curr_num_trials += 1
-
+        while episodes_counter[current_checkpoint] < 10:
+            graph_manager.evaluate(EnvironmentEpisodes(1))
+            episodes_counter[current_checkpoint] += 1
 
         latest_checkpoint = data_store.get_latest_checkpoint()
         if latest_checkpoint:
             if latest_checkpoint > current_checkpoint:
-                    data_store.load_from_store(expected_checkpoint_number=latest_checkpoint)
-                    graph_manager.restore_checkpoint()
+                data_store.get_a_particular_model(checkpoint_number=current_checkpoint+1)
+                graph_manager.restore_checkpoint()
     
         if should_stop(local_model_directory):
             break
@@ -141,7 +143,7 @@ def main():
     load_model_metadata(s3_client, args.model_metadata_s3_key, model_metadata_local_path)
 
     # Download the model
-    s3_client.download_model(args.local_model_directory)
+    # s3_client.download_model(args.local_model_directory)
 
     preset_file_success, _ = download_custom_files_if_present(s3_client, args.s3_prefix)
 
@@ -160,6 +162,9 @@ def main():
                                                    s3_folder=args.s3_prefix)
 
     data_store = S3BotoDataStore(ds_params_instance)
+
+    data_store.get_a_particular_model(checkpoint_number=1)
+
     graph_manager.data_store = data_store
 
     graph_manager.env_params.seed = 0

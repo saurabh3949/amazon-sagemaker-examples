@@ -62,7 +62,7 @@ class S3BotoDataStore(DataStore):
                                  Bucket=self.params.bucket,
                                  Key=self._get_s3_key(SyncFiles.FINISHED.value))
 
-    def save_to_store(self):
+    def save_to_store(self, clean_old_checkpoints=False):
         try:
             s3_client = self._get_client()
 
@@ -123,20 +123,21 @@ class S3BotoDataStore(DataStore):
                 logger.info("saved intermediate frozen graph: {}".format(self._get_s3_key(frozen_graph_s3_name)))
 
             # Clean up old checkpoints
-            checkpoint = self._get_current_checkpoint()
-            if checkpoint:
-                checkpoint_number = self._get_checkpoint_number(checkpoint)
-                checkpoint_number_to_delete = checkpoint_number - 4
+            if clean_old_checkpoints:
+                checkpoint = self._get_current_checkpoint()
+                if checkpoint:
+                    checkpoint_number = self._get_checkpoint_number(checkpoint)
+                    checkpoint_number_to_delete = checkpoint_number - 4
 
-                # List all the old checkpoint files to be deleted
-                response = s3_client.list_objects_v2(Bucket=self.params.bucket,
-                                                     Prefix=self._get_s3_key(str(checkpoint_number_to_delete) + "_"))
-                if "Contents" in response:
-                    num_files = 0
-                    for obj in response["Contents"]:
-                        s3_client.delete_object(Bucket=self.params.bucket,
-                                                Key=obj["Key"])
-                        num_files += 1
+                    # List all the old checkpoint files to be deleted
+                    response = s3_client.list_objects_v2(Bucket=self.params.bucket,
+                                                        Prefix=self._get_s3_key(str(checkpoint_number_to_delete) + "_"))
+                    if "Contents" in response:
+                        num_files = 0
+                        for obj in response["Contents"]:
+                            s3_client.delete_object(Bucket=self.params.bucket,
+                                                    Key=obj["Key"])
+                            num_files += 1
         except Exception as e:
             utils.json_format_logger("Exception [{}] occured while uploading files on S3 for checkpoint".format(e),
                       **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_500))
@@ -177,6 +178,62 @@ class S3BotoDataStore(DataStore):
             utils.json_format_logger("Exception [{}] occured while getting latest checkpoint from S3.".format(e),
                                      **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_503))
 
+    def get_a_particular_model(self, checkpoint_number=0):
+        try:
+            filename = os.path.abspath(os.path.join(self.params.checkpoint_dir, CHECKPOINT_METADATA_FILENAME))
+            if not os.path.exists(self.params.checkpoint_dir):
+                os.makedirs(self.params.checkpoint_dir)
+
+            while True:
+                s3_client = self._get_client()
+                # Check if there's a lock file
+                response = s3_client.list_objects_v2(Bucket=self.params.bucket,
+                                                     Prefix=self._get_s3_key(self.params.lock_file))
+
+                if "Contents" not in response:
+                    try:
+                        # If no lock is found, try getting the checkpoint
+                        prefix = "%s_Step" % checkpoint_number
+                        response = s3_client.list_objects_v2(Bucket=self.params.bucket,
+                                        Prefix=self._get_s3_key(prefix))
+
+                        if "Contents" in response:
+                            if len(response["Contents"]) == 3:
+                                full_key_prefix = os.path.normpath(self.key_prefix) + "/"
+                                model_file_name = response["Contents"][0]["Key"].replace(full_key_prefix, "")
+                                model_file_name = model_file_name.split(".ckpt")[0]
+                                self._create_checkpoint_file(model_file_name)
+                                for obj in response["Contents"]:
+                                    # Get the local filename of the checkpoint file
+                                    filename = os.path.abspath(os.path.join(self.params.checkpoint_dir,
+                                                                            obj["Key"].replace(full_key_prefix, "")))
+                                    s3_client.download_file(Bucket=self.params.bucket,
+                                                            Key=obj["Key"],
+                                                            Filename=filename)
+                            else:
+                                time.sleep(SLEEP_TIME_WHILE_WAITING_FOR_DATA_FROM_TRAINER_IN_SECOND)
+                                continue        
+                        else:
+                            time.sleep(SLEEP_TIME_WHILE_WAITING_FOR_DATA_FROM_TRAINER_IN_SECOND)
+                            continue
+                    except Exception as e:
+                        logger.info("Error occured while getting latest checkpoint %s. Waiting." % e)
+                        time.sleep(SLEEP_TIME_WHILE_WAITING_FOR_DATA_FROM_TRAINER_IN_SECOND)
+                        continue
+                else:
+                    time.sleep(SLEEP_TIME_WHILE_WAITING_FOR_DATA_FROM_TRAINER_IN_SECOND)
+                    continue
+
+                checkpoint = self._get_current_checkpoint()
+                if checkpoint:
+                    assert checkpoint_number == self._get_checkpoint_number(checkpoint)
+                    logger.info("Successfully downloaded checkpoint %s" % checkpoint_number)
+                    return checkpoint_number
+
+        except Exception as e:
+            logger.exception(e)
+            utils.json_format_logger("Exception [{}] occured while getting latest checkpoint from S3.".format(e),
+                                     **utils.build_system_error_dict(utils.SIMAPP_S3_DATA_STORE_EXCEPTION, utils.SIMAPP_EVENT_ERROR_CODE_503))
 
     def load_from_store(self, expected_checkpoint_number=-1):
         try:
@@ -281,7 +338,7 @@ class S3BotoDataStore(DataStore):
             if os.path.exists(checkpoint_metadata_filepath) == False:
                 return None
 
-            contents = open(checkpoint_metadata_filepath, 'r').read()
+            contents = open(checkpoint_metadata_filepath, 'r', encoding='utf-8').read()
             text_format.Merge(contents, checkpoint)
             return checkpoint
         except Exception as e:
@@ -292,3 +349,9 @@ class S3BotoDataStore(DataStore):
     def _get_checkpoint_number(self, checkpoint):
         checkpoint_relative_path = checkpoint.model_checkpoint_path
         return int(checkpoint_relative_path.split('_Step')[0])
+
+    def _create_checkpoint_file(self, model_file_name):
+        checkpoint_metadata_filepath = os.path.abspath(os.path.join(self.params.checkpoint_dir, CHECKPOINT_METADATA_FILENAME))
+        with open(checkpoint_metadata_filepath, "w", encoding="utf-8") as f:
+            f.write('model_checkpoint_path: "%s.ckpt"\nall_model_checkpoint_paths: "%s.ckpt"\n' % (model_file_name,model_file_name))
+        
