@@ -51,7 +51,8 @@ def main():
 
     for model in tar_gz_files:
         os.system(f"scp {model} deepracer@{car_ip}:/opt/aws/deepracer/artifacts/")
-        os.system(f"ssh deepracer@{car_ip} cd /opt/aws/deepracer/artifacts/; tar -xvzf ${model}")
+        os.system(f"ssh deepracer@{car_ip} cd /opt/aws/deepracer/artifacts/ && tar -xvzf {model}")
+        os.system(f"ssh deepracer@{car_ip} cd /opt/aws/deepracer/artifacts/ && rm {model}")
 
         
 if __name__ == '__main__':
