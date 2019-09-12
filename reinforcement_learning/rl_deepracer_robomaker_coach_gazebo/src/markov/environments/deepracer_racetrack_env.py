@@ -206,7 +206,11 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.reverse_dir = False
             # self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
             self.change_start = bool(rospy.get_param('CHANGE_START_POSITION', True))
-            self.alternate_dir = bool(rospy.get_param('ALTERNATE_DRIVING_DIRECTION', True))
+
+            if self.job_type == TRAINING_JOB:
+                self.alternate_dir = True
+            else:
+                self.alternate_dir = True
             print("Alternate direction is set to:", self.alternate_dir)
             
             self.is_simulation_done = False
@@ -330,8 +334,16 @@ class DeepRacerRacetrackEnv(gym.Env):
         self.done = False
 
         # Send this action to Gazebo and increment the step count
-        self.steering_angle = float(action[0])
-        self.speed = max(float(0.0), float(action[1]))
+        # if self.job_type == EVALUATION_JOB:
+        noise_fraction = 0.1
+        delta_steering = float(action[0]) * noise_fraction
+        self.steering_angle = np.random.uniform(float(action[0])-delta_steering, float(action[0])+delta_steering)
+        delta_speed = float(action[1]) * noise_fraction
+        self.speed = max(0, np.random.uniform(float(action[1])-delta_speed, float(action[1])+delta_speed))
+        # else:
+        #     self.steering_angle = float(action[0])
+        #     self.speed = float(action[1])
+
         if self.allow_servo_step_signals:
             self.send_action(self.steering_angle, self.speed)
         self.steps += 1
