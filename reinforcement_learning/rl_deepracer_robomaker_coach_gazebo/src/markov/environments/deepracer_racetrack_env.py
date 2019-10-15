@@ -205,12 +205,15 @@ class DeepRacerRacetrackEnv(gym.Env):
             self.start_ndist = 0.0
             self.reverse_dir = False
             # self.change_start = rospy.get_param('CHANGE_START_POSITION', (self.job_type == TRAINING_JOB))
-            self.change_start = bool(rospy.get_param('CHANGE_START_POSITION', True))
+            if self.job_type == TRAINING_JOB:
+                self.change_start = True
+            else:
+                self.change_start = False
 
             if self.job_type == TRAINING_JOB:
-                self.alternate_dir = True
+                self.alternate_dir = False
             else:
-                self.alternate_dir = True
+                self.alternate_dir = False
             print("Alternate direction is set to:", self.alternate_dir)
             
             self.is_simulation_done = False
@@ -336,13 +339,13 @@ class DeepRacerRacetrackEnv(gym.Env):
         # Send this action to Gazebo and increment the step count
         # if self.job_type == EVALUATION_JOB:
         noise_fraction = 0.1
-        delta_steering = float(action[0]) * noise_fraction
-        self.steering_angle = np.random.uniform(float(action[0])-delta_steering, float(action[0])+delta_steering)
-        delta_speed = float(action[1]) * noise_fraction
-        self.speed = max(0, np.random.uniform(float(action[1])-delta_speed, float(action[1])+delta_speed))
+        # delta_steering = float(action[0]) * noise_fraction
+        # self.steering_angle = np.random.uniform(float(action[0])-delta_steering, float(action[0])+delta_steering)
+        # delta_speed = float(action[1]) * noise_fraction
+        # self.speed = max(0, np.random.uniform(float(action[1])-delta_speed, float(action[1])+delta_speed))
         # else:
-        #     self.steering_angle = float(action[0])
-        #     self.speed = float(action[1])
+        self.steering_angle = float(action[0])
+        self.speed = float(action[1])
 
         if self.allow_servo_step_signals:
             self.send_action(self.steering_angle, self.speed)
