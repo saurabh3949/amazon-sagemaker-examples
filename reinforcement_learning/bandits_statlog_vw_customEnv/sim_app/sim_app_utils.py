@@ -28,16 +28,19 @@ def prepare_statlog_warm_start_data(data_file, batch_size):
     for i in range(0, batch_size):
         context_index_i = np.random.choice(statlog_context.shape[0])
         context_i = statlog_context[context_index_i]
-        action = np.random.choice(num_actions) + 1 #random action
+        action = np.random.choice(num_actions)  #random action
         action_prob = 1 / num_actions # probability of picking a random action
-        reward = 1 if statlog_labels[context_index_i][action-1] == 1 else 0
+        reward = 1 if statlog_labels[context_index_i][action] == 1 else 0
+        label = np.argmax(statlog_labels[context_index_i])
 
         json_blob = {"reward": reward,
                     "event_id": 'not-apply-to-warm-start',
                     "action": action,
                     "action_prob": action_prob,
                     "model_id": 'not-apply-to-warm-start',
-                    "observation": context_i.tolist(),
+                    "shared_context": context_i.tolist(),
+                    "actions_context": None,
+                    "label": label,
                     "sample_prob": np.random.uniform(0.0, 1.0)}
 
         joined_data_buffer.append(json_blob)

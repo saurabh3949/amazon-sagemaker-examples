@@ -84,7 +84,7 @@ class StatlogSimApp():
                    sample_prob, 
                    local_mode):
 
-        reward = 1 if self.labels[context_index][action-1] == 1 else 0
+        reward = 1 if self.labels[context_index][action] == 1 else 0
 
         if local_mode:
             json_blob = {"reward": reward,
@@ -92,11 +92,12 @@ class StatlogSimApp():
                          "action": action,
                          "action_prob": action_prob,
                          "model_id": model_id,
-                         "observation": self.context[context_index].tolist(),
+                         "shared_context": self.context[context_index].tolist(),
+                         "actions_context": None,
                          "sample_prob": sample_prob}
             self.joined_data_buffer.append(json_blob)
         else:
-            json_blob = {"reward": reward, "event_id": event_id}
+            json_blob = {"rewards": reward, "event_id": event_id}
             self.rewards_buffer.append(json_blob)
         
         return reward

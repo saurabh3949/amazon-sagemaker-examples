@@ -554,7 +554,7 @@ class Predictor(object):
                                                      deserializer=sagemaker.predictor.json_deserializer,
                                                      sagemaker_session=sagemaker_session)
 
-    def get_action(self, obs=None):
+    def get_actions(self, shared_context=None, actions_context=None, top_k=1):
         """Get prediction from the endpoint
         
         Args:
@@ -569,14 +569,16 @@ class Predictor(object):
         """
         payload = {}
         payload['request_type'] = "observation"
-        payload['observation'] = obs
+        payload['shared_context'] = shared_context
+        payload['actions_context'] = actions_context
+        payload["top_k"] = top_k
         response = self._realtime_predictor.predict(payload)
-        action = response['action']
-        action_prob = response['action_prob']
+        actions = response['actions']
+        action_probs = response['action_probs']
         event_id = response['event_id']
         model_id = response['model_id']
         sample_prob = response['sample_prob']
-        return action, event_id, model_id, action_prob, sample_prob
+        return actions, event_id, model_id, action_probs, sample_prob
 
     def get_hosted_model_id(self):
         """Return hostdd model id in the hosting endpoint
