@@ -4,10 +4,10 @@ import os
 from pathlib import Path
 import logging
 
-from vw_model import VWModel
+from vw_agent import VWAgent
 
 from io_utils import extract_model, CSVReader, validate_experience
-from vw_utils import TRAIN_CHANNEL, MODEL_CHANNEL, MODEL_OUTPUT_PATH, save_vw_model, save_vw_metadata
+from vw_utils import TRAIN_CHANNEL, MODEL_CHANNEL, MODEL_OUTPUT_PATH, MODEL_OUTPUT_DIR
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ def main():
     num_policies = int(hyperparameters.get("num_policies", 3))
     exploration_policy = hyperparameters.get("exploration_policy", "egreedy").lower()
     epsilon = float(hyperparameters.get("epsilon", 0))
+    arm_features = bool(hyperparameters.get("arm_features", True))
 
     if num_arms is 0:
         raise ValueError("Customer Error: Please provide a non-zero value for 'num_arms'")
@@ -35,35 +36,48 @@ def main():
         raise ValueError(f"Customer Error: exploration_policy must be one of {valid_policies}.")
     
     if exploration_policy == "egreedy":
-        vw_args_base = f"--cb_explore {num_arms} --epsilon {epsilon}"
+        vw_args_base = f"--cb_explore_adf --cb_type mtr --epsilon {epsilon}"
     else:
-        vw_args_base = f"--cb_explore {num_arms} --{exploration_policy} {num_policies}"
+        vw_args_base = f"--cb_explore_adf --cb_type mtr --{exploration_policy} {num_policies}"
 
     # No training data. Initialize and save a random model
     if TRAIN_CHANNEL not in channel_names:
         logging.info("No training data found. Saving a randomly initialized model!")
-        vw_model = VWModel(cli_args=f"{vw_args_base} -f {MODEL_OUTPUT_PATH}",
-                           model_path=None, test_only=False, quiet_mode=False)
+        vw_model = VWAgent(cli_args=vw_args_base,
+                           model_path=None,
+                           test_only=False,
+                           quiet_mode=False,
+                           output_dir=MODEL_OUTPUT_DIR,
+                           adf_mode=arm_features,
+                           num_actions=num_arms
+                           )
         vw_model.start()
-        vw_model.close()
-        save_vw_metadata(meta=vw_args_base)
+        vw_model.save_model(close=True)
     
     # If training data is present
     else:
         if MODEL_CHANNEL not in channel_names:
             logging.info(f"No pre-trained model has been specified in channel {MODEL_CHANNEL}."
                          f"Training will start from scratch.")
-            vw_args = f"{vw_args_base}"
+            vw_model = VWAgent(cli_args=vw_args_base,
+                               output_dir=MODEL_OUTPUT_DIR,
+                               model_path=None,
+                               test_only=False,
+                               quiet_mode=False,
+                               adf_mode=arm_features,
+                               num_actions=num_arms)
         else:
             # Load the pre-trained model for training.
             model_folder = os.environ[f'SM_CHANNEL_{MODEL_CHANNEL.upper()}']
-            _, weights_path = extract_model(model_folder)
+            metadata_path, weights_path = extract_model(model_folder)
             logging.info(f"Loading model from {weights_path}")
-            vw_args = f"{vw_args_base} -i {weights_path}"
-        
-        # Init a class that communicates with C++ VW process using pipes
-        vw_model = VWModel(cli_args=f"{vw_args} -f {MODEL_OUTPUT_PATH} --save_resume",
-                           model_path=None, test_only=False, quiet_mode=False)
+            vw_model = VWAgent.load_model(metadata_loc=metadata_path,
+                                          weights_loc=weights_path,
+                                          test_only=False,
+                                          quiet_mode=False,
+                                          output_dir=MODEL_OUTPUT_DIR)                 
+        # Init a class instance that communicates with C++ VW process using pipes
+
         vw_model.start()
 
         # Load training data
@@ -79,15 +93,15 @@ def main():
             is_valid = validate_experience(experience)
             if not is_valid:
                 continue
-            vw_model.learn(context_vector=json.loads(experience["observation"]),
-                           action=experience["action"],
-                           cost=1 - experience["reward"],
-                           probability=experience["action_prob"])
+            vw_model.learn(user_embedding=json.loads(experience.get("shared_context", "null")),
+                           candidate_embeddings=None,
+                           action_index=experience["action"],
+                           reward=experience["reward"],
+                           action_prob=experience["action_prob"])
             count += 1
         
-        stdout = vw_model.close()
+        stdout = vw_model.save_model(close=True)
         print(stdout.decode())
-        save_vw_metadata(meta=vw_args_base)
         logging.info(f"Model learned using {count} training experiences.")
 
 
