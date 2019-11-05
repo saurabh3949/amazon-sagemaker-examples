@@ -7,7 +7,7 @@ This Notebook demonstrates how you can manage your own contextual multi-armed ba
 
 - `bandits_statlog_vw_custom.ipynb`: Notebook used for running the contextual bandit notebook.<br>
 - `config.yaml`: The configuration parameters used for the bandit example.<br>
-- `sim_app`: Simulated client application that pings SageMaker for recommended action given a state. Also computes the rewards for each interaction.<br>
+- `recobanditsgym`: Simulated client application that pings SageMaker for recommended action given user and item features. Also computes the rewards for each interaction.<br>
 - `common`: Code that manages the different AWS components required for training workflow.<br>
 - `src`:
     - `train-vw.py`: Script for training with Vowpal Wabbit library.
