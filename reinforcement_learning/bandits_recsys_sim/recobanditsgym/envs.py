@@ -117,15 +117,19 @@ class MovieLensEnv():
                                    num_items=dataset.num_items)
             train, test = random_train_test_split(dataset, test_percentage=0.5)
 
-            self.model_full = ImplicitFactorizationModel(n_iter=3, loss='pointwise',                                                                       embedding_dim=embedding_dim)
-            self.model_train = ImplicitFactorizationModel(n_iter=3, loss='pointwise',                                                                       embedding_dim=embedding_dim)
+            self.model_full = ImplicitFactorizationModel(n_iter=3, loss='pointwise',
+                                                         embedding_dim=embedding_dim)
+            self.model_train = ImplicitFactorizationModel(n_iter=3, loss='pointwise',
+                                                          embedding_dim=embedding_dim)
 
         elif factorization == 'explicit':
             dataset.ratings = np.where(dataset.ratings > rating_threshold, 1.0, 0.0).astype("float32")
             train, test = random_train_test_split(dataset, test_percentage=0.5)
 
-            self.model_full = ExplicitFactorizationModel(n_iter=3, loss='logistic',                                                                        embedding_dim=embedding_dim)
-            self.model_train = ExplicitFactorizationModel(n_iter=3, loss='logistic',                                                                        embedding_dim=embedding_dim)
+            self.model_full = ExplicitFactorizationModel(n_iter=3, loss='logistic',
+                                                         embedding_dim=embedding_dim)
+            self.model_train = ExplicitFactorizationModel(n_iter=3, loss='logistic',
+                                                          embedding_dim=embedding_dim)
 
         print('Training model with full data')
         self.model_full.fit(dataset)
