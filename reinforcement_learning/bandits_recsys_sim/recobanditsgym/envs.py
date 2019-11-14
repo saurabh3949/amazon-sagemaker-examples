@@ -4,6 +4,14 @@ from typing import List
 
 import numpy as np
 
+# for movielens env
+import torch
+from spotlight.cross_validation import random_train_test_split
+from spotlight.datasets.movielens import get_movielens_dataset
+from spotlight.interactions import Interactions
+from spotlight.factorization.implicit import ImplicitFactorizationModel
+from spotlight.factorization.explicit import ExplicitFactorizationModel
+
 from recobanditsgym.embeddings import EmbeddingManager
 
 
@@ -79,131 +87,143 @@ class SimpleRecoEnv():
                 *[item.embedding for item in self.item_pool])
 
 
-class MSLREnv():
-    def __init__(self, mslr_npz_path, item_pool_size=10, ordering=0):
-        # Use https://github.com/akshaykr/oracle_cb/blob/master/PreloadMSLR.py to create MSLR npz file
-        mslr = np.load(mslr_npz_path)
-        self.relevances = mslr["relevances"]
-        self.features = mslr["features"]
-        self.docs_per_query = mslr["docsPerQuery"]
-        self.item_pool_size = item_pool_size
+
+class MovieLensEnv():
+    def __init__(self, variant='100K', factorization='explicit',
+                 rating_threshold=3.0, item_pool_size=50, top_k=5, embedding_dim=16):
+
+        dataset = get_movielens_dataset(variant=variant)
+        self.top_k = top_k
+
+        if item_pool_size is not None:
+            self.item_pool_size = item_pool_size
+        else:
+            # Use all items as the candidate list
+            self.item_pool_size = dataset.num_items - 1
+
         self.total_regret = 0
-        self.query_index = 0
-        mslr_dir = os.path.dirname(mslr_npz_path)
-        self.orderings = [np.load(os.path.join(mslr_dir, f'mslr30k_train_{i}.npz'))["order"] for i in range(20)]
-        self.ordering_index = ordering
-        self.current_ordering = self.orderings[ordering]
-        self.current_candidate_features = None
-        self.skipped_queries = 0
+
+        train, test = None, None
+
+        # Note: Since we want to model item attractiveness, we treat
+        # rating > rating_threshold as positive and others as negatives.
+        if factorization == 'implicit':
+            indices_to_keep = dataset.ratings > rating_threshold
+            user_ids = dataset.user_ids[indices_to_keep]
+            item_ids = dataset.item_ids[indices_to_keep]
+            dataset = Interactions(user_ids=user_ids,
+                                   item_ids=item_ids,
+                                   num_users=dataset.num_users,
+                                   num_items=dataset.num_items)
+            train, test = random_train_test_split(dataset, test_percentage=0.5)
+
+            self.model_full = ImplicitFactorizationModel(n_iter=3, loss='pointwise',                                                                       embedding_dim=embedding_dim)
+            self.model_train = ImplicitFactorizationModel(n_iter=3, loss='pointwise',                                                                       embedding_dim=embedding_dim)
+
+        elif factorization == 'explicit':
+            dataset.ratings = np.where(dataset.ratings > rating_threshold, 1.0, 0.0).astype("float32")
+            train, test = random_train_test_split(dataset, test_percentage=0.5)
+
+            self.model_full = ExplicitFactorizationModel(n_iter=3, loss='logistic',                                                                        embedding_dim=embedding_dim)
+            self.model_train = ExplicitFactorizationModel(n_iter=3, loss='logistic',                                                                        embedding_dim=embedding_dim)
+
+        print('Training model with full data')
+        self.model_full.fit(dataset)
+
+        print('Training model with training data')
+        self.model_train.fit(train)
+
+        self.attractiveness_means = np.zeros((dataset.num_users, dataset.num_items))
+
+        for user_id in range(0, dataset.num_users):
+            if factorization == 'explicit':
+                self.attractiveness_means[user_id, :] = self.model_full.predict(user_ids=user_id)
+            else:
+                predictions = torch.sigmoid(torch.from_numpy(self.model_full.predict(user_ids=user_id)))
+                self.attractiveness_means[user_id, :] = predictions.numpy()
+
+
+        self.user_embeddings = self.model_train._net.user_embeddings.weight.data.numpy()
+        self.item_embeddings = self.model_train._net.item_embeddings.weight.data.numpy()
+
+        self.total_users = test.num_users - 1  # Spotlight creates a dummy user with id=0
+        self.total_items = test.num_items - 1  # Spotlight creates a dummy item with id=0
         self.done = False
+        self.current_user_id = None
+        self.current_user_embedding = None
+        self.current_item_pool = None
+        self.current_items_embedding = None
+        self.step_count = 1
 
     def reset(self):
         self.done = False
-        self.query_index = 0
-        self.current_ordering = self.orderings[self.ordering_index]
-        self._regulate_document_pool()
-        return self.current_candidate_features
-
-    def get_feedback(self, actions):
-        last_query_id = self.current_ordering[self.query_index]
-        relevances = np.array([self.relevances[last_query_id][i] for i in actions])
-
-        rewards = relevances / 4
-        regret = np.max(self.relevances[last_query_id][:self.item_pool_size]) - relevances.max()
-        return rewards, regret
-
-    def get_oracle_rewards(self):
-        last_query_id = self.current_ordering[self.query_index]
-        relevances = self.relevances[last_query_id][:self.item_pool_size]
-        return np.sort(relevances)[-3:].sum()
-
-    def step(self, actions):
-        rewards, regret = self.get_feedback(actions)
-        self.total_regret += regret
-        info = {"total_regret": self.total_regret}
-
-        # Last query reached
-        if self.query_index == len(self.current_ordering) - 1:
-            return None, rewards, True, info
-        else:
-            self.query_index += 1
-            self._regulate_document_pool()
-            return self.current_candidate_features, rewards, self.done, info
-
-    def _regulate_document_pool(self):
-        if self.query_index == len(self.current_ordering) - 1:
-            self.current_candidate_features = None
-            self.done = True
-            return
-        new_query_id = self.current_ordering[self.query_index]
-        num_docs = self.docs_per_query[new_query_id]
-        num_docs = min(num_docs, self.item_pool_size)
-        if self.relevances[new_query_id][:num_docs].sum() < 0:
-            print(f"No relevant docs found for query ID: {new_query_id}. Skipping this query.")
-            self.query_index += 1
-            self.skipped_queries += 1
-            self._regulate_document_pool()
-        else:
-            self.current_candidate_features = self.features[new_query_id][:num_docs]
-
-
-class YahooEnv():
-    def __init__(self, yahoo_npz_path, item_pool_size=6, ordering=0):
-        yahoo = np.load(yahoo_npz_path)
-        self.relevances = yahoo["relevances"]
-        self.features = yahoo["features"]
-        self.docs_per_query = yahoo["docsPerQuery"]
-        self.item_pool_size = item_pool_size
+        self.current_user_id = None
+        self.current_user_embedding = None
+        self.current_item_pool = None
+        self.current_items_embedding = None
+        self.step_count = 1
         self.total_regret = 0
-        self.query_index = 0
-        yahoo_dir = os.path.dirname(yahoo_npz_path)
-        self.orderings = [np.load(os.path.join(yahoo_dir, f'yahoo_train_{i}.npz'))["order"] for i in range(20)]
-        self.ordering_index = ordering
-        self.current_ordering = self.orderings[ordering]
-        self.current_candidate_features = None
-        self.skipped_queries = 0
-        self.done = False
+        self.total_regret_random = 0
+        self._regulate_item_pool()
+        return self.current_user_embedding, self.current_items_embedding
 
-    def reset(self):
-        self.done = False
-        self.query_index = 0
-        self.current_ordering = self.orderings[self.ordering_index]
-        self._regulate_document_pool()
-        return self.current_candidate_features
-
-    def get_feedback(self, actions):
-        last_query_id = self.current_ordering[self.query_index]
-        relevances = np.array([self.relevances[last_query_id][i] for i in actions])
-
-        rewards = relevances / 4
-        regret = np.max(self.relevances[last_query_id][:self.item_pool_size]) - relevances.max()
-        return rewards, regret
+    def _regulate_item_pool(self):
+        if self.step_count > self.total_users:
+            self.step_count = 1
+        # TODO: Randomize user selection
+        self.current_user_id = self.step_count
+        self.current_user_embedding = self.user_embeddings[self.current_user_id]
+        # Randomly generate a candidate list of items
+        self.current_item_pool = np.array(random.sample(range(1, self.total_items+1), self.item_pool_size))
+        self.current_items_embedding = self.item_embeddings[self.current_item_pool]
 
     def step(self, actions):
-        rewards, regret = self.get_feedback(actions)
+        assert len(actions) == self.top_k, "Size of recommended items list does not match top-k"
+        rewards, regret, regret_random = self.get_feedback(actions)
         self.total_regret += regret
-        info = {"total_regret": self.total_regret}
+        self.total_regret_random += regret_random
+        info = {"total_regret": self.total_regret, "random_regret": self.total_regret_random}
 
-        # Last query reached
-        if self.query_index == len(self.current_ordering) - 1:
-            return None, rewards, True, info
-        else:
-            self.query_index += 1
-            self._regulate_document_pool()
-            return self.current_candidate_features, rewards, self.done, info
+        # Last user reached
+        self.step_count += 1
+        self._regulate_item_pool()
+        return (self.current_user_embedding, self.current_items_embedding), rewards, self.done, info
 
-    def _regulate_document_pool(self):
-        if self.query_index == len(self.current_ordering) - 1:
-            self.current_candidate_features = None
-            self.done = True
-            return
-        new_query_id = self.current_ordering[self.query_index]
-        num_docs = self.docs_per_query[new_query_id]
-        num_docs = min(num_docs, self.item_pool_size)
-        if self.relevances[new_query_id][:num_docs].sum() < 0 or num_docs < 2:
-            # print(f"No relevant docs found for query ID: {new_query_id}. Skipping this query.")
-            self.query_index += 1
-            self.skipped_queries += 1
-            self._regulate_document_pool()
-        else:
-            self.current_candidate_features = self.features[new_query_id][:num_docs]
+    def get_feedback(self, actions, click_model="cascade"):
+        """
+        Return rewards: List[float] and regret for the current recommended list - actions
+
+        Args:
+            actions: A list of top-k actions indices picked by the agent from candidate list
+            click_model: One of 'cascade', 'pbm'
+
+        Returns:
+            rewards: A reward corresponding to each item in the list
+            regret: Expected regret calculated based on the recommended actions
+        """
+
+        recommended_item_ids = self.current_item_pool[actions]
+        attraction_probs = self.attractiveness_means[self.step_count][recommended_item_ids]
+
+        random_indices = np.random.choice(len(recommended_item_ids), size=self.top_k, replace=False)
+        random_item_ids = self.current_item_pool[random_indices]
+        random_attraction_probs = self.attractiveness_means[self.step_count][random_item_ids]
+        # Simulate user behavior using a cascading click model.
+        # User scans the list top-down and clicks on an item with prob = attractiveness_means.
+        # User stops seeing the list after the first click.
+        clicks = np.random.binomial(1, attraction_probs)
+        if clicks.sum() > 1:
+            first_click = np.flatnonzero(clicks)[0]
+            clicks = clicks[:first_click + 1]
+
+        expected_reward_random = 1 - np.prod(1 - random_attraction_probs)
+        expected_reward = 1 - np.prod(1 - attraction_probs)
+
+
+        current_pool_probs = self.attractiveness_means[self.step_count][self.current_item_pool]
+        optimal_attraction_probs = np.sort(current_pool_probs)[::-1][:self.top_k]
+        expected_optimal_reward = 1 - np.prod(1 - optimal_attraction_probs)
+        regret = expected_optimal_reward - expected_reward
+        regret_random = expected_optimal_reward - expected_reward_random
+
+        return clicks, regret, regret_random
