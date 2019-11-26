@@ -13,7 +13,7 @@ def validate_experience(experience):
     """
     Validate the collected experience has required keys.
     """
-    keys = ["shared_context", "actions_context" ,"action_prob", "action", "reward"]
+    keys = ["shared_context", "actions_context" ,"action_prob", "action", "reward", "user_id"]
     for key in keys:
         is_valid = key in experience
         if not is_valid:

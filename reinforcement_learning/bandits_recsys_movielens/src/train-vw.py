@@ -31,12 +31,14 @@ def main():
 
     # Different exploration policies in VW
     # https://github.com/VowpalWabbit/vowpal_wabbit/wiki/Contextual-Bandit-algorithms
-    valid_policies = ["egreedy", "bag", "cover"]
+    valid_policies = ["egreedy", "bag", "regcbopt"]
     if exploration_policy not in valid_policies:
         raise ValueError(f"Customer Error: exploration_policy must be one of {valid_policies}.")
     
     if exploration_policy == "egreedy":
         vw_args_base = f"--cb_explore_adf --cb_type mtr --epsilon {epsilon}"
+    elif exploration_policy == "regcbopt":
+        vw_args_base = f"--cb_explore_adf --cb_type mtr --regcbopt --mellowness 0.01"
     else:
         vw_args_base = f"--cb_explore_adf --cb_type mtr --{exploration_policy} {num_policies}"
 
@@ -97,7 +99,8 @@ def main():
                            candidate_embeddings=json.loads(experience.get("actions_context", "null")),
                            action_index=experience["action"],
                            reward=experience["reward"],
-                           action_prob=experience["action_prob"])
+                           action_prob=experience["action_prob"],
+                           user_id=experience["user_id"])
             count += 1
         
         stdout = vw_model.save_model(close=True)
