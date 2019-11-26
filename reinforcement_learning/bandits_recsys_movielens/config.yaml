@@ -27,8 +27,8 @@ image: "462105765813.dkr.ecr.{AWS_REGION}.amazonaws.com/sagemaker-rl-vw-containe
 # Algorithm parameters
 algor:
   algorithms_parameters:
-    exploration_policy: "egreedy" # supports "egreedy", "bag", "cover"
-    epsilon: 0 # used if egreedy is the exploration policy
+    exploration_policy: "regcbopt" # supports "egreedy", "bag", "regcbopt"
+    epsilon: 0.01 # used if egreedy is the exploration policy
     num_policies: 3 # used if bag or cover is the exploration policy
     arm_features: true # set to true if each arm/action is represented by a feature vector. Useful with dynamic no. of actions
     num_arms: 7 # ignored when "arm_features" is set to true
