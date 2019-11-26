@@ -554,17 +554,17 @@ class Predictor(object):
                                                      deserializer=sagemaker.predictor.json_deserializer,
                                                      sagemaker_session=sagemaker_session)
 
-    def get_actions(self, shared_context=None, actions_context=None, top_k=1):
+    def get_actions(self, shared_context=None, actions_context=None, top_k=1, user_id=0):
         """Get prediction from the endpoint
         
         Args:
             obs (list/str): observation of the environment
 
         Returns:
-            action: action to take from the prediction
+            actions: recommended action indices
             event_id: event id of the current prediction
             model_id: model id of the hosted model
-            action_prob: action probability distribution
+            action_probs: actions probability distribution
             sample_prob: sample probability distribution used for data split
         """
         payload = {}
@@ -572,6 +572,7 @@ class Predictor(object):
         payload['shared_context'] = shared_context
         payload['actions_context'] = actions_context
         payload["top_k"] = top_k
+        payload["user_id"] = user_id
         response = self._realtime_predictor.predict(payload)
         actions = response['actions']
         action_probs = response['action_probs']
