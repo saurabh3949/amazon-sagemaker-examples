@@ -1,7 +1,7 @@
 resource:
   shared_resource:
     # cloud formation stack
-    resources_cf_stack_name: "BanditsSharedResourceStackSG"
+    resources_cf_stack_name: "BanditsSharedResourceStack"
     # Dynamo table for status of an experiment
     experiment_db:
       table_name: "BanditsExperimentTable"
