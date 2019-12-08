@@ -206,12 +206,13 @@ class JoinManager:
         query_string = f"""
             CREATE EXTERNAL TABLE IF NOT EXISTS {self.obs_table_partitioned} (
                     event_id STRING,
-                    action INT,
-                    observation STRING,
+                    actions ARRAY<FLOAT>,
+                    action_probs ARRAY<FLOAT>,
                     model_id STRING,
-                    action_prob FLOAT,
+                    shared_context STRING,
+                    actions_context STRING,
                     sample_prob FLOAT
-            )
+            ) 
             PARTITIONED BY (dt string) 
             ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
             LOCATION '{input_obs_data_s3_path}'
@@ -224,10 +225,11 @@ class JoinManager:
         query_string = f"""
             CREATE EXTERNAL TABLE IF NOT EXISTS {self.obs_table_non_partitioned} (
                     event_id STRING,
-                    action INT,
-                    observation STRING,
+                    actions ARRAY<FLOAT>,
+                    action_probs ARRAY<FLOAT>,
                     model_id STRING,
-                    action_prob FLOAT,
+                    shared_context STRING,
+                    actions_context STRING,
                     sample_prob FLOAT
             )
             ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
@@ -266,7 +268,8 @@ class JoinManager:
         query_string = f"""
             CREATE EXTERNAL TABLE IF NOT EXISTS {self.rewards_table} (
                     event_id STRING,
-                    reward FLOAT                    
+                    rewards ARRAY<FLOAT>,
+                    user_id STRING            
             )
             ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
             LOCATION '{input_reward_data_s3_path}'
@@ -353,35 +356,59 @@ class JoinManager:
 
         if start_time is None or end_time is None:
             query_string_prefix = f"""
-                    WITH joined_table AS
-                    (SELECT {self.obs_table_non_partitioned}.event_id AS event_id,
-                            {self.obs_table_non_partitioned}.action AS action,
-                            {self.obs_table_non_partitioned}.action_prob AS action_prob,
-                            {self.obs_table_non_partitioned}.model_id AS model_id,
-                            {self.obs_table_non_partitioned}.observation AS observation,
-                            {self.obs_table_non_partitioned}.sample_prob AS sample_prob,
-                            {self.rewards_table}.reward AS reward
-                    FROM {self.obs_table_non_partitioned}
-                    JOIN {self.rewards_table}
-                    ON {self.rewards_table}.event_id={self.obs_table_non_partitioned}.event_id)"""
+                    WITH joined_table AS (
+                        WITH obs_table AS (   
+                            SELECT event_id, actions, action_probs, model_id, shared_context, actions_context, sample_prob
+                            FROM {self.obs_table_non_partitioned}
+                        ),
+                        rewards_table AS (
+                            SELECT event_id, user_id, rewards
+                            FROM {self.rewards_table}
+                        )
+                        SELECT obs_table.event_id,
+                            reward,
+                            action,
+                            action_prob,
+                            model_id,
+                            shared_context,
+                            actions_context,
+                            user_id,
+                            sample_prob
+                        FROM obs_table
+                        JOIN rewards_table
+                            ON obs_table.event_id = rewards_table.event_id
+                        CROSS JOIN UNNEST(rewards, actions, action_probs) AS t(reward, action, action_prob)
+                        WHERE
+                            reward IS NOT NULL     
+                    )
+                    """
         else:
             query_string_prefix = f"""
-                    WITH joined_table AS
-                    (   WITH obs_table AS
-                        (SELECT *
-                         FROM {self.obs_table_partitioned}
-                         WHERE dt<='{end_time_str}' AND dt>='{start_time_str}'
+                    WITH joined_table AS (
+                        WITH obs_table AS (
+                            SELECT event_id, actions, action_probs, model_id, shared_context, actions_context, sample_prob
+                            FROM {self.obs_table_partitioned}
+                            WHERE dt<='{end_time_str}' AND dt>='{start_time_str}'
+                        ),
+                        rewards_table AS (
+                            SELECT event_id, user_id, rewards
+                            FROM {self.rewards_table}
                         )
-                        SELECT obs_table.event_id AS event_id,
-                            obs_table.action AS action,
-                            obs_table.action_prob AS action_prob,
-                            obs_table.model_id AS model_id,
-                            obs_table.observation AS observation,
-                            obs_table.sample_prob AS sample_prob,
-                            {self.rewards_table}.reward AS reward
+                        SELECT obs_table.event_id,
+                            reward,
+                            action,
+                            action_prob,
+                            model_id,
+                            shared_context,
+                            actions_context,
+                            user_id,
+                            sample_prob
                         FROM obs_table
-                        JOIN {self.rewards_table}
-                        ON {self.rewards_table}.event_id=obs_table.event_id
+                        JOIN rewards_table
+                            ON obs_table.event_id = rewards_table.event_id
+                        CROSS JOIN UNNEST(rewards, actions, action_probs) AS t(reward, action, action_prob)
+                        WHERE
+                            reward IS NOT NULL     
                     )"""
 
         if train_data:
@@ -405,7 +432,7 @@ class JoinManager:
         Return:
             str: A unique id for Athena query
         """
-        # logger.debug(query_string)
+        logger.debug(query_string)
         try:
             response = self.athena_client.start_query_execution(
                 QueryString=query_string,

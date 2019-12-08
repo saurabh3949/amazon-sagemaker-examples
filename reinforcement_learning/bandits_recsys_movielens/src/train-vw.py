@@ -97,7 +97,7 @@ def main():
                 continue
             vw_model.learn(user_embedding=json.loads(experience.get("shared_context", "null")),
                            candidate_embeddings=json.loads(experience.get("actions_context", "null")),
-                           action_index=experience["action"],
+                           action_index=int(experience["action"]),
                            reward=experience["reward"],
                            action_prob=experience["action_prob"],
                            user_id=experience["user_id"])
